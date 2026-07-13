@@ -2,3 +2,8 @@ node_modules/
 certs/
 .env
 .server.log
+.sessions.json
+.session
+.usage.json
+android/app/build/
+public/handsfree.apk
