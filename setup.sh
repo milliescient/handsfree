@@ -54,14 +54,24 @@ else
     echo "  Otherwise, set: export ANTHROPIC_API_KEY=sk-ant-..."
 fi
 
-if [ -n "$OPENAI_API_KEY" ]; then
-    echo "✓ OPENAI_API_KEY is set (Whisper transcription enabled)"
+# Check for local Whisper server
+WHISPER_URL="${WHISPER_URL:-http://127.0.0.1:9876/transcribe}"
+if curl -s --connect-timeout 1 "$WHISPER_URL" > /dev/null 2>&1 || curl -s --connect-timeout 1 "${WHISPER_URL%/transcribe}" > /dev/null 2>&1; then
+    echo "✓ Local Whisper server found at $WHISPER_URL"
 else
-    echo "NOTE: OPENAI_API_KEY not set."
-    echo "  Voice transcription uses OpenAI's Whisper API."
-    echo "  Set: export OPENAI_API_KEY=sk-..."
-    echo "  Or add to .env file: OPENAI_API_KEY=sk-..."
-    echo "  Without this, you can still use the text input box."
+    echo "NOTE: No local Whisper server at $WHISPER_URL"
+    if [ -n "$OPENAI_API_KEY" ]; then
+        echo "  Will use OpenAI Whisper API as fallback"
+    else
+        echo "  Set up faster-whisper for local transcription, or set OPENAI_API_KEY"
+        echo "  See: https://github.com/SYSTRAN/faster-whisper"
+    fi
+fi
+
+if [ -n "$OPENAI_API_KEY" ]; then
+    echo "✓ OPENAI_API_KEY is set (fallback Whisper)"
+else
+    echo "NOTE: OPENAI_API_KEY not set (local Whisper only, or text input)"
 fi
 
 # Create .env file if it doesn't exist
@@ -74,6 +84,9 @@ if [ ! -f .env ]; then
 
 # ANTHROPIC_API_KEY=sk-ant-...
 # OPENAI_API_KEY=sk-...
+
+# Optional: local Whisper server URL (default http://127.0.0.1:9876/transcribe)
+# WHISPER_URL=http://127.0.0.1:9876/transcribe
 
 # Optional: port (default 8443)
 # PORT=8443

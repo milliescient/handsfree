@@ -18,10 +18,12 @@ one Node server, one HTML page, no build step.
   append that tells it to keep spoken replies short and never ask for
   confirmation.
 - Voice input uses [Silero VAD](https://github.com/snakers4/silero-vad) for
-  voice activity detection and OpenAI's Whisper API for transcription. Tap the
-  mic to talk; replies are spoken via the browser's TTS. Toggle **🎧 hands-free**
-  and the mic automatically reopens every time Claude finishes speaking — a full
-  voice loop with no touching.
+  voice activity detection and Whisper for transcription. If you have a local
+  [faster-whisper](https://github.com/SYSTRAN/faster-whisper) server running,
+  it uses that (fast, free, private); otherwise falls back to OpenAI's API.
+  Tap the mic to talk; replies are spoken via the browser's TTS. Toggle
+  **🎧 hands-free** and the mic automatically reopens every time Claude finishes
+  speaking — a full voice loop with no touching.
 - The transcript pane shows everything in full (including a live feed of tool
   calls: which commands and file edits the agent is making), so you can glance
   at your phone to see what it's actually doing. **■** interrupts the agent
@@ -64,6 +66,7 @@ otherwise set `ANTHROPIC_API_KEY`.
 | --- | --- |
 | Working directory | first CLI arg, or `WORKDIR` env var (default: cwd) |
 | Port | `PORT` env var (default 8443) |
+| Local Whisper | `WHISPER_URL` env var (default `http://127.0.0.1:9876/transcribe`) |
 | Access token | `TOKEN` env var (default: random per start, shown in the URL) |
 
 ### Off your home network

@@ -44,6 +44,81 @@ const WORKDIR = path.resolve(process.argv[2] || process.env.WORKDIR || process.c
 const SESSIONS_FILE = path.join(__dirname, '.sessions.json');
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const USAGE_FILE = path.join(__dirname, '.usage.json');
+// Local Whisper server (faster-whisper on GPU) - falls back to OpenAI if unavailable
+const LOCAL_WHISPER_URL = process.env.WHISPER_URL || 'http://127.0.0.1:9876/transcribe';
+
+// Transcribe audio using local Whisper server, falling back to OpenAI API
+async function transcribeAudio(audioBuffer, contentType = 'audio/wav') {
+  // Calculate duration from WAV header (16kHz mono 16-bit)
+  let durationSeconds = 0;
+  if (contentType === 'audio/wav' && audioBuffer.length > 44) {
+    const sampleRate = audioBuffer.readUInt32LE(24);
+    const dataSize = audioBuffer.length - 44;
+    durationSeconds = dataSize / (sampleRate * 2);
+  }
+
+  // Try local Whisper server first
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30000);
+    const localRes = await fetch(LOCAL_WHISPER_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': contentType },
+      body: audioBuffer,
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    const result = await localRes.json();
+    if (result.text !== undefined) {
+      console.log('Local Whisper:', result.text ? result.text.slice(0, 50) : '(empty)');
+      if (durationSeconds > 0) {
+        const usage = addWhisperUsage(durationSeconds);
+        console.log(`Transcribed ${durationSeconds.toFixed(1)}s, total: ${(usage.whisperSeconds/60).toFixed(2)} min`);
+      }
+      return { text: result.text, source: 'local' };
+    }
+    if (result.error) throw new Error(result.error);
+  } catch (err) {
+    console.log('Local Whisper unavailable:', err.message, '- trying OpenAI');
+  }
+
+  // Fall back to OpenAI API
+  if (!OPENAI_API_KEY) {
+    throw new Error('Local Whisper unavailable and OPENAI_API_KEY not set');
+  }
+
+  const extMap = { 'audio/webm': 'webm', 'audio/mp4': 'm4a', 'audio/ogg': 'ogg', 'audio/wav': 'wav' };
+  const ext = extMap[contentType] || 'wav';
+  const boundary = '----Boundary' + randomBytes(8).toString('hex');
+  const body = Buffer.concat([
+    Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="audio.${ext}"\r\nContent-Type: ${contentType}\r\n\r\n`),
+    audioBuffer,
+    Buffer.from(`\r\n--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\nwhisper-1\r\n--${boundary}--\r\n`),
+  ]);
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30000);
+  const whisperRes = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${OPENAI_API_KEY}`,
+      'Content-Type': `multipart/form-data; boundary=${boundary}`,
+    },
+    body,
+    signal: controller.signal,
+  });
+  clearTimeout(timeout);
+  const result = await whisperRes.json();
+  console.log('OpenAI Whisper:', result.text ? result.text.slice(0, 50) : result.error);
+
+  if (durationSeconds > 0) {
+    const usage = addWhisperUsage(durationSeconds);
+    console.log(`Transcribed ${durationSeconds.toFixed(1)}s, total: ${(usage.whisperSeconds/60).toFixed(2)} min`);
+  }
+
+  if (result.error) throw new Error(result.error.message || result.error);
+  return { text: result.text || '', source: 'openai' };
+}
 
 function loadUsage() {
   try {
@@ -218,52 +293,13 @@ const server = createServer(loadOrCreateCert(), async (req, res) => {
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ ...usage, whisperMinutes: parseFloat(minutes) }));
   } else if (url.pathname === '/transcribe' && req.method === 'POST') {
-    if (!OPENAI_API_KEY) {
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ error: 'OPENAI_API_KEY not set' }));
-      return;
-    }
     try {
       const chunks = [];
       for await (const chunk of req) chunks.push(chunk);
       const audioBuffer = Buffer.concat(chunks);
+      const contentType = (req.headers['content-type'] || 'audio/wav').split(';')[0].trim();
 
-      const contentType = (req.headers['content-type'] || 'audio/webm').split(';')[0].trim();
-      const extMap = { 'audio/webm': 'webm', 'audio/mp4': 'm4a', 'audio/ogg': 'ogg', 'audio/wav': 'wav' };
-      const ext = extMap[contentType] || 'webm';
-
-      // Calculate audio duration from WAV header (16kHz mono 16-bit)
-      let durationSeconds = 0;
-      if (contentType === 'audio/wav' && audioBuffer.length > 44) {
-        const sampleRate = audioBuffer.readUInt32LE(24);
-        const dataSize = audioBuffer.length - 44;
-        const bytesPerSample = 2; // 16-bit
-        durationSeconds = dataSize / (sampleRate * bytesPerSample);
-      }
-
-      const boundary = '----Boundary' + randomBytes(8).toString('hex');
-      const body = Buffer.concat([
-        Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="audio.${ext}"\r\nContent-Type: ${contentType}\r\n\r\n`),
-        audioBuffer,
-        Buffer.from(`\r\n--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\nwhisper-1\r\n--${boundary}--\r\n`),
-      ]);
-
-      const whisperRes = await fetch('https://api.openai.com/v1/audio/transcriptions', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${OPENAI_API_KEY}`,
-          'Content-Type': `multipart/form-data; boundary=${boundary}`,
-        },
-        body,
-      });
-      const result = await whisperRes.json();
-
-      // Track usage if we got a duration
-      if (durationSeconds > 0) {
-        const usage = addWhisperUsage(durationSeconds);
-        console.log(`Whisper: ${durationSeconds.toFixed(1)}s, total: ${(usage.whisperSeconds/60).toFixed(2)} min`);
-      }
-
+      const result = await transcribeAudio(audioBuffer, contentType);
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify(result));
     } catch (err) {
@@ -409,53 +445,12 @@ wss.on('connection', (ws) => {
     } else if (msg.type === 'transcribe' && msg.audio) {
       // Handle transcription over WebSocket (for Android where fetch to self-signed cert fails)
       console.log('Received transcribe request, audio length:', msg.audio.length);
-      if (!OPENAI_API_KEY) {
-        console.log('No OPENAI_API_KEY set');
-        send({ type: 'transcription', error: 'OPENAI_API_KEY not set' });
-        return;
-      }
       try {
         const audioBuffer = Buffer.from(msg.audio, 'base64');
-        const contentType = 'audio/wav';
-
-        // Calculate duration from WAV header
-        let durationSeconds = 0;
-        if (audioBuffer.length > 44) {
-          const sampleRate = audioBuffer.readUInt32LE(24);
-          const dataSize = audioBuffer.length - 44;
-          durationSeconds = dataSize / (sampleRate * 2);
-        }
-
-        const boundary = '----Boundary' + randomBytes(8).toString('hex');
-        const body = Buffer.concat([
-          Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="audio.wav"\r\nContent-Type: ${contentType}\r\n\r\n`),
-          audioBuffer,
-          Buffer.from(`\r\n--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\nwhisper-1\r\n--${boundary}--\r\n`),
-        ]);
-
-        console.log('Sending to Whisper API, audio size:', audioBuffer.length);
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 30000); // 30s timeout
-        const whisperRes = await fetch('https://api.openai.com/v1/audio/transcriptions', {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${OPENAI_API_KEY}`,
-            'Content-Type': `multipart/form-data; boundary=${boundary}`,
-          },
-          body,
-          signal: controller.signal,
-        });
-        clearTimeout(timeout);
-        const result = await whisperRes.json();
-        console.log('Whisper response:', result.text ? result.text.slice(0, 50) : result.error);
-
-        if (durationSeconds > 0) {
-          const usage = addWhisperUsage(durationSeconds);
-          console.log(`Whisper: ${durationSeconds.toFixed(1)}s, total: ${(usage.whisperSeconds/60).toFixed(2)} min`);
-        }
-
+        console.log('Transcribing audio, size:', audioBuffer.length);
+        const result = await transcribeAudio(audioBuffer, 'audio/wav');
         console.log('Sending transcription response to client');
-        send({ type: 'transcription', text: result.text || '', error: result.error?.message });
+        send({ type: 'transcription', text: result.text || '' });
       } catch (err) {
         console.error('Transcription error:', err.message);
         send({ type: 'transcription', error: err.message });
