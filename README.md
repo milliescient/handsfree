@@ -17,9 +17,11 @@ one Node server, one HTML page, no build step.
 - The agent runs with `permissionMode: "bypassPermissions"` and a system-prompt
   append that tells it to keep spoken replies short and never ask for
   confirmation.
-- The page uses the Web Speech API: tap the mic to talk, replies are spoken via
-  TTS. Toggle **🎧 hands-free** and the mic automatically reopens every time
-  Claude finishes speaking — a full voice loop with no touching.
+- Voice input uses [Silero VAD](https://github.com/snakers4/silero-vad) for
+  voice activity detection and OpenAI's Whisper API for transcription. Tap the
+  mic to talk; replies are spoken via the browser's TTS. Toggle **🎧 hands-free**
+  and the mic automatically reopens every time Claude finishes speaking — a full
+  voice loop with no touching.
 - The transcript pane shows everything in full (including a live feed of tool
   calls: which commands and file edits the agent is making), so you can glance
   at your phone to see what it's actually doing. **■** interrupts the agent
@@ -28,8 +30,17 @@ one Node server, one HTML page, no build step.
 ## Setup
 
 ```bash
+./setup.sh                            # install dependencies, check config
+export OPENAI_API_KEY=sk-...          # for Whisper voice transcription
+node server.js /path/to/your/project  # the directory Claude will work in
+```
+
+Or manually:
+
+```bash
 npm install
 export ANTHROPIC_API_KEY=sk-ant-...   # if not already authenticated
+export OPENAI_API_KEY=sk-...          # for Whisper voice transcription
 node server.js /path/to/your/project  # the directory Claude will work in
 ```
 
