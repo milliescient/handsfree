@@ -132,7 +132,7 @@ function connect() {
     if (m.type === 'hello') workdirEl.textContent = m.workdir;
     else if (m.type === 'tool') add('tool', '⚙ ' + m.text);
     else if (m.type === 'status') add('status', m.text);
-    else if (m.type === 'assistant') add('claude', m.text);
+    else if (m.type === 'assistant') { add('claude', m.text); if (agentBusy) speakBrief(m.text); }
     else if (m.type === 'error') { agentBusy = false; setState('idle'); micBtn.classList.remove('busy'); add('error', m.text); speak('Something went wrong: ' + m.text); }
     else if (m.type === 'result') {
       agentBusy = false; setState('idle'); micBtn.classList.remove('busy');
@@ -224,26 +224,41 @@ function unlockTTS() {
   }, 3000);
 }
 
-function speak(text) {
-  const clean = speakable(text);
-  if (!clean || !('speechSynthesis' in window)) { if (handsFree) startListening(); return; }
-  speechSynthesis.cancel();
-  const u = new SpeechSynthesisUtterance(clean.slice(0, 1200));
+function speakRaw(clean) {
+  if (!clean || !('speechSynthesis' in window)) {
+    if (handsFree && !agentBusy) startListening();
+    return;
+  }
+  speechSynthesis.cancel(); // a newer update supersedes whatever is mid-sentence
+  const u = new SpeechSynthesisUtterance(clean);
   u.rate = 1.05;
   const finish = () => {
     clearInterval(keepAlive);
-    setState('idle');
+    if (!agentBusy) setState('idle');
+    // only reopen the mic at end of turn, not after progress updates
     if (handsFree && !listening && !agentBusy) startListening();
   };
   u.onend = finish;
   u.onerror = finish;
-  setState('speaking');
+  setState(agentBusy ? 'working' : 'speaking');
   // Desktop Chrome silently stalls long utterances after ~15s unless nudged.
   const keepAlive = setInterval(() => {
     if (speechSynthesis.speaking) speechSynthesis.resume();
     else clearInterval(keepAlive);
   }, 5000);
   speechSynthesis.speak(u);
+}
+
+// Full reply, spoken at end of turn.
+function speak(text) {
+  speakRaw(speakable(text).slice(0, 2000));
+}
+
+// Progress narration while the agent works: first sentence, kept short.
+function speakBrief(text) {
+  const clean = speakable(text);
+  if (!clean) return;
+  speakRaw(clean.split(/(?<=[.!?])\s+/)[0].slice(0, 180));
 }
 
 // ---------------- Controls ----------------
