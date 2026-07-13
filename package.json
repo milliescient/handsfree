@@ -1,0 +1,14 @@
+{
+  "name": "handsfree",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Hands-free voice interface for Claude Code — control an agent from your phone or any browser",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.1.0",
+    "ws": "^8.18.0"
+  }
+}
