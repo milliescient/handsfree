@@ -72,6 +72,7 @@
   <div id="dot"></div>
   <div id="workdir">connecting…</div>
   <button id="autoBtn" title="Auto-listen after Claude speaks">🎧 hands-free</button>
+  <button id="speakBtn" title="Replay last reply / test speech">🔊</button>
 </header>
 
 <div id="log"></div>
@@ -135,7 +136,7 @@ function connect() {
     else if (m.type === 'error') { agentBusy = false; setState('idle'); micBtn.classList.remove('busy'); add('error', m.text); speak('Something went wrong: ' + m.text); }
     else if (m.type === 'result') {
       agentBusy = false; setState('idle'); micBtn.classList.remove('busy');
-      if (m.text) speak(m.text);
+      if (m.text) { lastReply = m.text; speak(m.text); }
       else if (handsFree) startListening();
     }
   };
@@ -205,23 +206,53 @@ function speakable(text) {
     .trim();
 }
 
+let ttsUnlocked = false;
+let lastReply = '';
+
+// Browsers refuse to play audio that wasn't initiated by a user gesture.
+// Speaking a silent utterance inside the first tap unlocks TTS for the
+// replies that arrive later over the WebSocket.
+function unlockTTS() {
+  if (ttsUnlocked || !('speechSynthesis' in window)) return;
+  ttsUnlocked = true;
+  const u = new SpeechSynthesisUtterance(' ');
+  u.volume = 0;
+  speechSynthesis.speak(u);
+  setTimeout(() => {
+    if (speechSynthesis.getVoices().length === 0)
+      add('error', 'No text-to-speech voices in this browser, so replies will be silent. Linux: install speech-dispatcher + espeak-ng (or use Chrome). iPhone: check the mute switch.');
+  }, 3000);
+}
+
 function speak(text) {
   const clean = speakable(text);
   if (!clean || !('speechSynthesis' in window)) { if (handsFree) startListening(); return; }
   speechSynthesis.cancel();
   const u = new SpeechSynthesisUtterance(clean.slice(0, 1200));
   u.rate = 1.05;
-  u.onend = () => { if (handsFree && !listening && !agentBusy) startListening(); };
+  const finish = () => {
+    clearInterval(keepAlive);
+    setState('idle');
+    if (handsFree && !listening && !agentBusy) startListening();
+  };
+  u.onend = finish;
+  u.onerror = finish;
   setState('speaking');
-  u.onstart = () => setState('speaking');
-  u.onerror = () => { setState('idle'); if (handsFree && !agentBusy) startListening(); };
-  const done = () => { if (!handsFree) setState('idle'); };
-  u.addEventListener('end', done);
+  // Desktop Chrome silently stalls long utterances after ~15s unless nudged.
+  const keepAlive = setInterval(() => {
+    if (speechSynthesis.speaking) speechSynthesis.resume();
+    else clearInterval(keepAlive);
+  }, 5000);
   speechSynthesis.speak(u);
 }
 
 // ---------------- Controls ----------------
-micBtn.onclick = () => { listening ? stopListening() : startListening(); };
+micBtn.onclick = () => { unlockTTS(); listening ? stopListening() : startListening(); };
+
+document.getElementById('speakBtn').onclick = () => {
+  unlockTTS();
+  speak(lastReply || 'Text to speech is working. Ask me something and I will read the answer out loud.');
+};
 
 stopBtn.onclick = () => {
   speechSynthesis.cancel();
@@ -233,15 +264,16 @@ stopBtn.onclick = () => {
 };
 
 autoBtn.onclick = () => {
+  unlockTTS();
   handsFree = !handsFree;
   autoBtn.classList.toggle('on', handsFree);
-  if (handsFree) { speechSynthesis.speak(new SpeechSynthesisUtterance('')); startListening(); } // empty utterance unlocks TTS on iOS
+  if (handsFree) startListening();
   else stopListening();
 };
 
-document.getElementById('sendBtn').onclick = () => { sendUser(textInput.value); textInput.value = ''; };
+document.getElementById('sendBtn').onclick = () => { unlockTTS(); sendUser(textInput.value); textInput.value = ''; };
 textInput.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') { sendUser(textInput.value); textInput.value = ''; }
+  if (e.key === 'Enter') { unlockTTS(); sendUser(textInput.value); textInput.value = ''; }
 });
 </script>
 </body>

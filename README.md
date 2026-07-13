@@ -68,6 +68,21 @@ prompts) to anyone with the URL. The random token in the URL is the only lock:
 don't share it, don't run this on untrusted networks, and prefer Tailscale
 over port-forwarding.
 
+## If you don't hear anything
+
+Replies are spoken with the browser's built-in text-to-speech. Tap **🔊** in
+the header — it replays the last reply, or speaks a test phrase. If the test
+phrase is silent:
+
+- **Desktop Linux**: Chromium and Firefox ship with no TTS voices. Install
+  `speech-dispatcher` and `espeak-ng` and restart the browser, or use Chrome
+  (which bundles Google voices).
+- **iPhone**: the hardware mute switch silences TTS — flip it, and raise the
+  volume.
+- **Any browser**: audio must start from a tap; the page unlocks it on your
+  first button press, so use the buttons rather than only the keyboard the
+  first time.
+
 ## Browser support
 
 - **Android Chrome**: full support (best experience).
