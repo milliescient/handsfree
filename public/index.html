@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <title>handsfree · Claude Code</title>
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.wasm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.29/dist/bundle.min.js"></script>
 <style>
   :root {
     --bg: #0e0f13; --panel: #181a21; --border: #2a2d38;
@@ -65,6 +67,11 @@
     border-radius: 10px; padding: 10px 14px; font-size: 16px; outline: none;
   }
   #sendBtn { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 10px; padding: 0 16px; }
+  .session-btn { width: 100%; text-align: left; background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 10px; padding: 12px 16px; margin-bottom: 8px; cursor: pointer; }
+  .session-btn:hover { border-color: var(--accent); }
+  .session-btn .preview { color: var(--dim); font-size: 13px; margin-top: 4px; }
+  .session-btn .time { color: var(--dim); font-size: 11px; }
+  .session-btn.new { border-color: var(--ok); color: var(--ok); }
 </style>
 </head>
 <body>
@@ -75,6 +82,10 @@
   <button id="speakBtn" title="Replay last reply / test speech">🔊</button>
 </header>
 
+<div id="sessionPicker" style="display:none; padding:16px;">
+  <div style="color:var(--dim); margin-bottom:12px;">Choose a session:</div>
+  <div id="sessionList"></div>
+</div>
 <div id="log"></div>
 
 <footer>
@@ -105,6 +116,42 @@ let listening = false;
 let agentBusy = false;
 let handsFree = false;
 let interimEl = null;
+let sessionChosen = false;
+const sessionPicker = document.getElementById('sessionPicker');
+const sessionList = document.getElementById('sessionList');
+
+function showSessionPicker(sessions) {
+  sessionList.innerHTML = '';
+
+  // New session button
+  const newBtn = document.createElement('button');
+  newBtn.className = 'session-btn new';
+  newBtn.textContent = '+ Start new session';
+  newBtn.onclick = () => selectSession(null);
+  sessionList.appendChild(newBtn);
+
+  // Existing sessions
+  for (const s of sessions) {
+    const btn = document.createElement('button');
+    btn.className = 'session-btn';
+    const time = new Date(s.lastUsed).toLocaleString();
+    btn.innerHTML = `<div class="time">${time}</div><div class="preview">${s.preview || '(no preview)'}</div>`;
+    btn.onclick = () => selectSession(s.id);
+    sessionList.appendChild(btn);
+  }
+
+  sessionPicker.style.display = 'block';
+  log.style.display = 'none';
+}
+
+function selectSession(id) {
+  sessionChosen = true;
+  sessionPicker.style.display = 'none';
+  log.style.display = 'flex';
+  if (ws && ws.readyState === 1) {
+    ws.send(JSON.stringify({ type: 'session', id }));
+  }
+}
 
 function add(cls, text) {
   const el = document.createElement('div');
@@ -129,14 +176,25 @@ function connect() {
   };
   ws.onmessage = (ev) => {
     const m = JSON.parse(ev.data);
-    if (m.type === 'hello') workdirEl.textContent = m.workdir;
+    if (m.type === 'hello') {
+      workdirEl.textContent = m.workdir;
+      // Show session picker if there are previous sessions
+      if (m.sessions && m.sessions.length > 0 && !sessionChosen) {
+        showSessionPicker(m.sessions);
+      } else {
+        sessionChosen = true;
+        log.style.display = 'flex';
+      }
+    }
     else if (m.type === 'tool') add('tool', '⚙ ' + m.text);
     else if (m.type === 'status') add('status', m.text);
-    else if (m.type === 'assistant') { add('claude', m.text); if (agentBusy) speakBrief(m.text); }
+    else if (m.type === 'assistant') { add('claude', m.text); lastReply = m.text; if (agentBusy) speakBrief(m.text); }
     else if (m.type === 'error') { agentBusy = false; setState('idle'); micBtn.classList.remove('busy'); add('error', m.text); speak('Something went wrong: ' + m.text); }
     else if (m.type === 'result') {
       agentBusy = false; setState('idle'); micBtn.classList.remove('busy');
-      if (m.text) { lastReply = m.text; speak(m.text); }
+      const toSpeak = m.text || lastReply;
+      console.log('result received, toSpeak:', toSpeak, 'ttsUnlocked:', ttsUnlocked);
+      if (toSpeak) { lastReply = toSpeak; speak(toSpeak); }
       else if (handsFree) startListening();
     }
   };
@@ -153,46 +211,110 @@ function sendUser(text) {
   setState('working');
 }
 
-// ---------------- Speech recognition ----------------
-const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-let rec = null;
+// ---------------- Silero VAD with Whisper ----------------
+let myvad = null;
+let vadReady = false;
 
-function startListening() {
-  if (!SR) { add('error', 'Speech recognition is not supported in this browser — use the text box.'); return; }
+// Convert Float32Array at 16kHz to WAV blob
+function float32ToWav(float32Array, sampleRate = 16000) {
+  const buffer = new ArrayBuffer(44 + float32Array.length * 2);
+  const view = new DataView(buffer);
+  const writeString = (offset, str) => { for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i)); };
+  writeString(0, 'RIFF');
+  view.setUint32(4, 36 + float32Array.length * 2, true);
+  writeString(8, 'WAVE');
+  writeString(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeString(36, 'data');
+  view.setUint32(40, float32Array.length * 2, true);
+  for (let i = 0; i < float32Array.length; i++) {
+    const s = Math.max(-1, Math.min(1, float32Array[i]));
+    view.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+  }
+  return new Blob([buffer], { type: 'audio/wav' });
+}
+
+async function initVAD() {
+  if (vadReady) return;
+  try {
+    myvad = await vad.MicVAD.new({
+      onSpeechStart: () => {
+        if (!interimEl) interimEl = add('interim', '');
+        interimEl.textContent = '… listening...';
+      },
+      onSpeechEnd: async (audio) => {
+        listening = false;
+        micBtn.classList.remove('listening');
+        setState('transcribing');
+        if (!interimEl) interimEl = add('interim', '');
+        interimEl.textContent = '… transcribing...';
+
+        try {
+          const audioBlob = float32ToWav(audio);
+          const res = await fetch(`/transcribe?key=${encodeURIComponent(KEY)}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'audio/wav' },
+            body: audioBlob,
+          });
+          const result = await res.json();
+          if (interimEl) { interimEl.remove(); interimEl = null; }
+
+          if (result.error) {
+            add('error', result.error);
+            setState('idle');
+          } else if (result.text && result.text.trim()) {
+            sendUser(result.text.trim());
+          } else {
+            setState('idle');
+          }
+        } catch (err) {
+          if (interimEl) { interimEl.remove(); interimEl = null; }
+          add('error', 'Transcription failed: ' + err.message);
+          setState('idle');
+        }
+        if (handsFree && !agentBusy) setTimeout(startListening, 800);
+      },
+      onnxWASMBasePath: "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/",
+      baseAssetPath: "https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.29/dist/",
+    });
+    vadReady = true;
+  } catch (err) {
+    add('error', 'VAD init failed: ' + err.message);
+  }
+}
+
+async function startListening() {
   if (listening) return;
-  speechSynthesis.cancel(); // barge-in: talking over Claude stops the TTS
-  rec = new SR();
-  rec.lang = navigator.language || 'en-US';
-  rec.interimResults = true;
-  rec.continuous = false;
-  let finalText = '';
+  unlockTTS();
+  speechSynthesis.cancel();
 
-  rec.onresult = (e) => {
-    let interim = '';
-    for (const r of e.results) (r.isFinal ? (finalText += r[0].transcript) : (interim += r[0].transcript));
-    if (!interimEl) interimEl = add('interim', '');
-    interimEl.textContent = '… ' + (finalText + interim);
-  };
-  rec.onend = () => {
-    listening = false;
-    micBtn.classList.remove('listening');
-    if (interimEl) { interimEl.remove(); interimEl = null; }
-    if (finalText.trim()) sendUser(finalText);
-    else if (!agentBusy) setState('idle');
-    if (!finalText.trim() && handsFree && !agentBusy) setTimeout(() => startListening(), 400);
-  };
-  rec.onerror = (e) => {
-    if (e.error !== 'no-speech' && e.error !== 'aborted') add('error', 'mic: ' + e.error);
-  };
+  if (!vadReady) {
+    setState('loading VAD...');
+    await initVAD();
+  }
 
-  rec.start();
-  listening = true;
-  micBtn.classList.add('listening');
-  setState('listening');
+  if (myvad) {
+    myvad.start();
+    listening = true;
+    micBtn.classList.add('listening');
+    setState('listening');
+  }
 }
 
 function stopListening() {
-  if (rec) rec.stop();
+  if (myvad) {
+    myvad.pause();
+  }
+  listening = false;
+  micBtn.classList.remove('listening');
+  if (interimEl) { interimEl.remove(); interimEl = null; }
+  setState('idle');
 }
 
 // ---------------- Text to speech ----------------
@@ -224,12 +346,17 @@ function unlockTTS() {
   }, 3000);
 }
 
+let speakTimeout = null;
 function speakRaw(clean) {
   if (!clean || !('speechSynthesis' in window)) {
     if (handsFree && !agentBusy) startListening();
     return;
   }
+  clearTimeout(speakTimeout);
   speechSynthesis.cancel(); // a newer update supersedes whatever is mid-sentence
+  // Chrome bug: calling speak() immediately after cancel() can silently fail.
+  // A short delay lets the browser finish the cancellation before we queue new audio.
+  speakTimeout = setTimeout(() => {
   const u = new SpeechSynthesisUtterance(clean);
   u.rate = 1.05;
   const finish = () => {
@@ -247,11 +374,14 @@ function speakRaw(clean) {
     else clearInterval(keepAlive);
   }, 5000);
   speechSynthesis.speak(u);
+  }, 50);
 }
 
 // Full reply, spoken at end of turn.
 function speak(text) {
-  speakRaw(speakable(text).slice(0, 2000));
+  const clean = speakable(text).slice(0, 2000);
+  console.log('speak() called, clean text length:', clean.length, 'ttsUnlocked:', ttsUnlocked);
+  speakRaw(clean);
 }
 
 // Progress narration while the agent works: first sentence, kept short.
