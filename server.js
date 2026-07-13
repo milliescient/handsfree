@@ -1,12 +1,12 @@
 // handsfree — voice-controlled Claude Code server.
 // Serves a mobile web UI over self-signed HTTPS and bridges speech-transcribed
-// messages to the Claude Agent SDK over a token-protected WebSocket.
+// messages to the Claude Agent SDK over WebSocket.
 
 import { createServer } from 'node:https';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { networkInterfaces } from 'node:os';
-import crypto from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
@@ -41,7 +41,6 @@ process.on('unhandledRejection', (err) => {
 
 const PORT = Number(process.env.PORT || 8443);
 const WORKDIR = path.resolve(process.argv[2] || process.env.WORKDIR || process.cwd());
-const TOKEN = process.env.TOKEN || crypto.randomBytes(8).toString('hex');
 const SESSIONS_FILE = path.join(__dirname, '.sessions.json');
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const USAGE_FILE = path.join(__dirname, '.usage.json');
@@ -81,14 +80,15 @@ function saveSessions(sessions) {
   try { writeFileSync(SESSIONS_FILE, JSON.stringify(sessions, null, 2)); } catch {}
 }
 
-function addOrUpdateSession(id, preview = '') {
+function addOrUpdateSession(id, preview = '', lastResponse = '') {
   const sessions = loadSessions();
   const existing = sessions.find(s => s.id === id);
   if (existing) {
     existing.lastUsed = Date.now();
-    if (preview) existing.preview = preview.slice(0, 100);
+    if (preview) existing.preview = preview.slice(0, 300);
+    if (lastResponse) existing.lastResponse = lastResponse.slice(0, 500);
   } else {
-    sessions.unshift({ id, lastUsed: Date.now(), preview: preview.slice(0, 100) });
+    sessions.unshift({ id, lastUsed: Date.now(), preview: preview.slice(0, 300), lastResponse: lastResponse.slice(0, 500) });
   }
   // Keep only last 20 sessions
   saveSessions(sessions.slice(0, 20));
@@ -97,6 +97,49 @@ function addOrUpdateSession(id, preview = '') {
 function getMostRecentSessionId() {
   const sessions = loadSessions();
   return sessions.length > 0 ? sessions[0].id : null;
+}
+
+// Load conversation history from SDK session file
+function loadSessionHistory(sessionId, maxMessages = 20) {
+  const homeDir = process.env.HOME || process.env.USERPROFILE;
+  const projectPath = WORKDIR.replace(/\//g, '-');
+  const sessionFile = path.join(homeDir, '.claude', 'projects', projectPath, `${sessionId}.jsonl`);
+
+  const messages = [];
+  try {
+    if (!existsSync(sessionFile)) return messages;
+    const lines = readFileSync(sessionFile, 'utf8').split('\n').filter(l => l.trim());
+
+    for (const line of lines) {
+      try {
+        const entry = JSON.parse(line);
+        if (entry.type === 'user' && entry.message?.content) {
+          // User message - extract text
+          const text = entry.message.content
+            .filter(b => b.type === 'text')
+            .map(b => b.text)
+            .join('\n');
+          if (text.trim()) {
+            messages.push({ role: 'user', text: text.slice(0, 500) });
+          }
+        } else if (entry.type === 'assistant' && entry.message?.content) {
+          // Assistant message - extract text only (skip tool calls)
+          const text = entry.message.content
+            .filter(b => b.type === 'text')
+            .map(b => b.text)
+            .join('\n');
+          if (text.trim()) {
+            messages.push({ role: 'assistant', text: text.slice(0, 1000) });
+          }
+        }
+      } catch {}
+    }
+  } catch (err) {
+    console.error('Error loading session history:', err.message);
+  }
+
+  // Return last N messages
+  return messages.slice(-maxMessages);
 }
 
 const VOICE_SYSTEM_PROMPT = `
@@ -151,34 +194,30 @@ function loadOrCreateCert() {
 // ---------------------------------------------------------------------------
 // HTTP: serve the single-page UI.
 // ---------------------------------------------------------------------------
-const indexHtml = readFileSync(path.join(__dirname, 'public', 'index.html'));
-
 const server = createServer(loadOrCreateCert(), async (req, res) => {
   const url = new URL(req.url, 'https://x');
   if (url.pathname === '/' || url.pathname === '/index.html') {
-    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    // Re-read HTML on each request so we pick up changes during dev
+    const indexHtml = readFileSync(path.join(__dirname, 'public', 'index.html'));
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
     res.end(indexHtml);
-  } else if (url.pathname === '/sessions' && req.method === 'GET') {
-    if (url.searchParams.get('key') !== TOKEN) {
-      res.writeHead(401).end('unauthorized');
-      return;
+  } else if (url.pathname === '/handsfree.apk') {
+    const apkPath = path.join(__dirname, 'public', 'handsfree.apk');
+    if (existsSync(apkPath)) {
+      res.writeHead(200, { 'content-type': 'application/vnd.android.package-archive', 'content-disposition': 'attachment; filename="handsfree.apk"' });
+      res.end(readFileSync(apkPath));
+    } else {
+      res.writeHead(404).end('APK not found');
     }
+  } else if (url.pathname === '/sessions' && req.method === 'GET') {
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify(loadSessions()));
   } else if (url.pathname === '/usage' && req.method === 'GET') {
-    if (url.searchParams.get('key') !== TOKEN) {
-      res.writeHead(401).end('unauthorized');
-      return;
-    }
     const usage = loadUsage();
     const minutes = (usage.whisperSeconds / 60).toFixed(2);
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ ...usage, whisperMinutes: parseFloat(minutes) }));
   } else if (url.pathname === '/transcribe' && req.method === 'POST') {
-    if (url.searchParams.get('key') !== TOKEN) {
-      res.writeHead(401).end('unauthorized');
-      return;
-    }
     if (!OPENAI_API_KEY) {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ error: 'OPENAI_API_KEY not set' }));
@@ -202,7 +241,7 @@ const server = createServer(loadOrCreateCert(), async (req, res) => {
         durationSeconds = dataSize / (sampleRate * bytesPerSample);
       }
 
-      const boundary = '----Boundary' + crypto.randomBytes(8).toString('hex');
+      const boundary = '----Boundary' + randomBytes(8).toString('hex');
       const body = Buffer.concat([
         Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="audio.${ext}"\r\nContent-Type: ${contentType}\r\n\r\n`),
         audioBuffer,
@@ -239,17 +278,17 @@ const server = createServer(loadOrCreateCert(), async (req, res) => {
 // ---------------------------------------------------------------------------
 // WebSocket: one Claude session per connection, messages queued while busy.
 // ---------------------------------------------------------------------------
-const wss = new WebSocketServer({ server });
+const wss = new WebSocketServer({ server, maxPayload: 50 * 1024 * 1024 }); // 50MB max for audio
 
-wss.on('connection', (ws, req) => {
-  const url = new URL(req.url, 'https://x');
-  if (url.searchParams.get('key') !== TOKEN) {
-    ws.close(4001, 'bad token');
-    return;
-  }
-
+wss.on('connection', (ws) => {
+  console.log('New WebSocket connection');
   const send = (obj) => { if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(obj)); };
   let sessionId = null; // Will be set by client via 'session' message or on first turn
+  let sessionChosen = false; // Track whether user has explicitly chosen a session
+
+  ws.on('error', (err) => {
+    console.error('WebSocket error:', err.message);
+  });
   let active = null; // in-flight Query object, for interrupt
   const pending = []; // utterances queued while a turn is running
   let lastUserMessage = '';
@@ -265,6 +304,9 @@ wss.on('connection', (ws, req) => {
   }
 
   async function runTurn(text) {
+    let lastAssistantText = '';
+    const requestedSessionId = sessionId; // Remember what we asked for
+    console.log(`runTurn: requested resume=${requestedSessionId || 'new session'}`);
     active = query({
       prompt: text,
       options: {
@@ -278,6 +320,10 @@ wss.on('connection', (ws, req) => {
     try {
       for await (const m of active) {
         if (m.type === 'system' && m.subtype === 'init') {
+          console.log(`SDK init: got session_id=${m.session_id}, requested=${requestedSessionId}`);
+          if (requestedSessionId && m.session_id !== requestedSessionId) {
+            console.warn(`Session mismatch! Requested ${requestedSessionId} but got ${m.session_id}`);
+          }
           sessionId = m.session_id;
           addOrUpdateSession(sessionId, lastUserMessage);
         } else if (m.type === 'assistant') {
@@ -285,16 +331,23 @@ wss.on('connection', (ws, req) => {
           for (const block of blocks) {
             if (block.type === 'text' && block.text.trim()) {
               send({ type: 'assistant', text: block.text });
+              lastAssistantText = block.text; // Track last response
             } else if (block.type === 'tool_use') {
               send({ type: 'tool', text: toolSummary(block) });
             }
           }
         } else if (m.type === 'result') {
           const errored = m.subtype && m.subtype !== 'success';
+          // Update session with last response
+          console.log(`Result: sessionId=${sessionId}, lastAssistantText length=${lastAssistantText.length}, preview="${lastAssistantText.slice(0,50)}"`);
+          if (sessionId && lastAssistantText) {
+            addOrUpdateSession(sessionId, lastUserMessage, lastAssistantText);
+          }
           send({
             type: 'result',
             ok: !errored,
             text: m.result || (errored ? `Turn ended: ${m.subtype}` : ''),
+            sessions: loadSessions(), // Send updated sessions list
           });
         }
       }
@@ -319,21 +372,96 @@ wss.on('connection', (ws, req) => {
     } else if (msg.type === 'session') {
       // Client wants to resume a specific session or start fresh (null)
       sessionId = msg.id || null;
+      sessionChosen = true;
       if (sessionId) {
         console.log('Client selected session:', sessionId);
-        send({ type: 'status', text: 'Resuming session...' });
+        // Load and send conversation history
+        const history = loadSessionHistory(sessionId);
+        console.log(`Loaded ${history.length} messages from session history`);
+        send({ type: 'history', messages: history });
+        // Don't send status after history - it can cause issues
       } else {
         console.log('Client starting new session');
         send({ type: 'status', text: 'Starting new session...' });
       }
+    } else if (msg.type === 'deleteSession' && msg.id) {
+      // Delete a session from the sessions file
+      const sessions = loadSessions();
+      const updated = sessions.filter(s => s.id !== msg.id);
+      saveSessions(updated);
+      console.log('Deleted session:', msg.id);
+      // Send updated sessions list back to client
+      send({ type: 'sessionsUpdated', sessions: updated });
     } else if (msg.type === 'user' && typeof msg.text === 'string' && msg.text.trim()) {
       lastUserMessage = msg.text.trim();
+      console.log(`Received user message, current sessionId=${sessionId}, sessionChosen=${sessionChosen}`);
+      if (!sessionChosen) {
+        console.warn('User message received before session was chosen, ignoring');
+        send({ type: 'error', text: 'Please select a session first' });
+        return;
+      }
       if (active) {
         pending.push(msg.text);
         send({ type: 'status', text: 'queued — still working on the last request' });
       } else {
         runTurn(msg.text);
       }
+    } else if (msg.type === 'transcribe' && msg.audio) {
+      // Handle transcription over WebSocket (for Android where fetch to self-signed cert fails)
+      console.log('Received transcribe request, audio length:', msg.audio.length);
+      if (!OPENAI_API_KEY) {
+        console.log('No OPENAI_API_KEY set');
+        send({ type: 'transcription', error: 'OPENAI_API_KEY not set' });
+        return;
+      }
+      try {
+        const audioBuffer = Buffer.from(msg.audio, 'base64');
+        const contentType = 'audio/wav';
+
+        // Calculate duration from WAV header
+        let durationSeconds = 0;
+        if (audioBuffer.length > 44) {
+          const sampleRate = audioBuffer.readUInt32LE(24);
+          const dataSize = audioBuffer.length - 44;
+          durationSeconds = dataSize / (sampleRate * 2);
+        }
+
+        const boundary = '----Boundary' + randomBytes(8).toString('hex');
+        const body = Buffer.concat([
+          Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="audio.wav"\r\nContent-Type: ${contentType}\r\n\r\n`),
+          audioBuffer,
+          Buffer.from(`\r\n--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\nwhisper-1\r\n--${boundary}--\r\n`),
+        ]);
+
+        console.log('Sending to Whisper API, audio size:', audioBuffer.length);
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 30000); // 30s timeout
+        const whisperRes = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${OPENAI_API_KEY}`,
+            'Content-Type': `multipart/form-data; boundary=${boundary}`,
+          },
+          body,
+          signal: controller.signal,
+        });
+        clearTimeout(timeout);
+        const result = await whisperRes.json();
+        console.log('Whisper response:', result.text ? result.text.slice(0, 50) : result.error);
+
+        if (durationSeconds > 0) {
+          const usage = addWhisperUsage(durationSeconds);
+          console.log(`Whisper: ${durationSeconds.toFixed(1)}s, total: ${(usage.whisperSeconds/60).toFixed(2)} min`);
+        }
+
+        console.log('Sending transcription response to client');
+        send({ type: 'transcription', text: result.text || '', error: result.error?.message });
+      } catch (err) {
+        console.error('Transcription error:', err.message);
+        send({ type: 'transcription', error: err.message });
+      }
+    } else {
+      console.log('Unknown message type:', msg.type);
     }
   });
 
@@ -347,9 +475,9 @@ wss.on('connection', (ws, req) => {
 server.listen(PORT, () => {
   console.log(`\nhandsfree — voice interface for Claude Code`);
   console.log(`Working directory for the agent: ${WORKDIR}\n`);
-  console.log(`Open on this machine:  https://localhost:${PORT}/?key=${TOKEN}`);
+  console.log(`Open on this machine:  https://localhost:${PORT}/`);
   for (const addr of lanAddresses()) {
-    console.log(`Open on your phone:    https://${addr}:${PORT}/?key=${TOKEN}`);
+    console.log(`Open on your phone:    https://${addr}:${PORT}/`);
   }
   console.log(`\n(The certificate is self-signed — tap through the browser warning once.)`);
 });

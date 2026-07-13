@@ -67,31 +67,61 @@
     border-radius: 10px; padding: 10px 14px; font-size: 16px; outline: none;
   }
   #sendBtn { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 10px; padding: 0 16px; }
-  .session-btn { width: 100%; text-align: left; background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 10px; padding: 12px 16px; margin-bottom: 8px; cursor: pointer; }
+  .session-btn { width: 100%; text-align: left; background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 10px; padding: 12px 16px; margin-bottom: 8px; cursor: pointer; position: relative; }
   .session-btn:hover { border-color: var(--accent); }
-  .session-btn .preview { color: var(--dim); font-size: 13px; margin-top: 4px; }
+  .session-btn .preview { color: var(--dim); font-size: 13px; margin-top: 4px; padding-right: 40px; }
   .session-btn .time { color: var(--dim); font-size: 11px; }
   .session-btn.new { border-color: var(--ok); color: var(--ok); }
+  .session-btn .delete { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); color: var(--err); font-size: 24px; padding: 12px; min-width: 44px; min-height: 44px; display: flex; align-items: center; justify-content: center; }
+  .host-btn { width: 100%; text-align: left; background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 10px; padding: 12px 16px; margin-bottom: 8px; cursor: pointer; }
+  .host-btn:hover { border-color: var(--accent); }
+  .host-btn .url { color: var(--dim); font-size: 13px; margin-top: 4px; word-break: break-all; }
+  .host-btn.add { border-color: var(--ok); color: var(--ok); }
+  .host-btn .delete { float: right; color: var(--err); font-size: 18px; padding: 0 8px; }
+  #hostPicker input { width: 100%; background: var(--panel); border: 1px solid var(--border); color: var(--text); border-radius: 10px; padding: 12px 16px; font-size: 16px; margin-bottom: 8px; outline: none; }
+  #hostPicker input:focus { border-color: var(--accent); }
+  #navbar { display: flex; border-bottom: 1px solid var(--border); }
+  #navbar button { flex: 1; background: var(--panel); color: var(--dim); border: none; padding: 12px 8px; font-size: 14px; cursor: pointer; border-bottom: 2px solid transparent; }
+  #navbar button.active { color: var(--accent); border-bottom-color: var(--accent); }
+  #navbar button:not(.active):hover { color: var(--text); }
 </style>
 </head>
 <body>
 <header>
   <div id="dot"></div>
   <div id="workdir">connecting…</div>
+  <a id="apkBtn" href="handsfree.apk" download style="display:none;background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 12px;font-size:13px;text-decoration:none;">📱 APK</a>
   <button id="autoBtn" title="Auto-listen after Claude speaks">🎧 hands-free</button>
-  <button id="speakBtn" title="Replay last reply / test speech">🔊</button>
 </header>
 
+<nav id="navbar">
+  <button id="navHosts">Servers</button>
+  <button id="navSessions">Sessions</button>
+  <button id="navChat" class="active">Chat</button>
+</nav>
+
+<div id="hostPicker" style="display:none; padding:16px;">
+  <div style="color:var(--dim); margin-bottom:12px;">Connect to a server:</div>
+  <div id="hostList"></div>
+  <div id="addHostForm" style="display:none; margin-top:16px;">
+    <input id="newHostName" placeholder="hostname or IP address" autocomplete="off">
+    <input id="newHostPort" placeholder="port" value="8443" autocomplete="off" style="margin-top:0;">
+    <div style="display:flex; gap:8px;">
+      <button class="host-btn" id="saveHostBtn" style="flex:1; text-align:center;">Save</button>
+      <button class="host-btn" id="cancelHostBtn" style="flex:1; text-align:center; color:var(--dim);">Cancel</button>
+    </div>
+  </div>
+</div>
 <div id="sessionPicker" style="display:none; padding:16px;">
   <div style="color:var(--dim); margin-bottom:12px;">Choose a session:</div>
   <div id="sessionList"></div>
 </div>
-<div id="log"></div>
+<div id="log" style="display:none;"></div>
 
 <footer>
   <div id="controls">
     <div id="state">idle</div>
-    <button id="mic" title="Tap to talk">🎙️</button>
+    <button id="mic" title="Tap to talk"></button>
     <button id="stop" title="Interrupt">■</button>
   </div>
   <div id="textRow">
@@ -101,7 +131,6 @@
 </footer>
 
 <script>
-const KEY = new URLSearchParams(location.search).get('key') || '';
 const log = document.getElementById('log');
 const dot = document.getElementById('dot');
 const workdirEl = document.getElementById('workdir');
@@ -117,8 +146,154 @@ let agentBusy = false;
 let handsFree = false;
 let interimEl = null;
 let sessionChosen = false;
+let currentSessionId = localStorage.getItem('handsfree_session') || null; // Persist across reloads
+let cachedSessions = []; // Store sessions from server
 const sessionPicker = document.getElementById('sessionPicker');
 const sessionList = document.getElementById('sessionList');
+const hostPicker = document.getElementById('hostPicker');
+const hostList = document.getElementById('hostList');
+const navHosts = document.getElementById('navHosts');
+const navSessions = document.getElementById('navSessions');
+const navChat = document.getElementById('navChat');
+
+function setNavActive(page) {
+  navHosts.classList.remove('active');
+  navSessions.classList.remove('active');
+  navChat.classList.remove('active');
+  if (page === 'hosts') navHosts.classList.add('active');
+  else if (page === 'sessions') navSessions.classList.add('active');
+  else navChat.classList.add('active');
+}
+
+function showPage(page) {
+  hostPicker.style.display = 'none';
+  sessionPicker.style.display = 'none';
+  log.style.display = 'none';
+  setNavActive(page);
+  if (page === 'hosts') {
+    showHostPicker();
+  } else if (page === 'sessions') {
+    // Use cached sessions (updated from hello message and after each session use)
+    showSessionPicker(cachedSessions);
+  } else {
+    log.style.display = 'flex';
+  }
+}
+
+// Host can come from URL (browser) or saved config (app)
+let serverHost = location.host;
+
+// Check if we're running in the app - Capacitor uses localhost or has the native bridge
+const isApp = !location.host || location.protocol === 'file:' || location.host === 'localhost' || !!(window.Capacitor || window.AudioBridge);
+
+// Show APK download button only in browser, not in app
+if (!isApp) {
+  document.getElementById('apkBtn').style.display = 'block';
+}
+
+function loadHosts() {
+  try { return JSON.parse(localStorage.getItem('handsfree_hosts') || '[]'); } catch { return []; }
+}
+
+function saveHosts(hosts) {
+  localStorage.setItem('handsfree_hosts', JSON.stringify(hosts));
+}
+
+function showHostPicker() {
+  const hosts = loadHosts();
+  hostList.innerHTML = '';
+
+  // Add new host button
+  const addBtn = document.createElement('button');
+  addBtn.className = 'host-btn add';
+  addBtn.textContent = '+ Add new server';
+  addBtn.onclick = () => {
+    document.getElementById('addHostForm').style.display = 'block';
+    document.getElementById('newHostUrl').focus();
+  };
+  hostList.appendChild(addBtn);
+
+  // Existing hosts
+  for (let i = 0; i < hosts.length; i++) {
+    const h = hosts[i];
+    const btn = document.createElement('button');
+    btn.className = 'host-btn';
+    btn.innerHTML = `<span class="delete" data-index="${i}">×</span><div>${h.name || 'Server'}</div><div class="url">${h.host}</div>`;
+    btn.onclick = (e) => {
+      if (e.target.classList.contains('delete')) {
+        e.stopPropagation();
+        const idx = parseInt(e.target.dataset.index);
+        const updatedHosts = loadHosts();
+        updatedHosts.splice(idx, 1);
+        saveHosts(updatedHosts);
+        showHostPicker();
+        return;
+      }
+      selectHost(h.host);
+    };
+    hostList.appendChild(btn);
+  }
+
+  hostPicker.style.display = 'block';
+  log.style.display = 'none';
+  sessionPicker.style.display = 'none';
+}
+
+function selectHost(host) {
+  serverHost = host;
+  hostPicker.style.display = 'none';
+  connect();
+}
+
+document.getElementById('saveHostBtn').onclick = () => {
+  const hostname = document.getElementById('newHostName').value.trim();
+  const port = document.getElementById('newHostPort').value.trim() || '8443';
+  if (!hostname) return;
+
+  const host = `${hostname}:${port}`;
+  const hosts = loadHosts();
+  // Check for duplicate
+  if (!hosts.some(h => h.host === host)) {
+    hosts.push({ host, name: hostname });
+    saveHosts(hosts);
+  }
+
+  document.getElementById('addHostForm').style.display = 'none';
+  document.getElementById('newHostName').value = '';
+  document.getElementById('newHostPort').value = '8443';
+  selectHost(host);
+};
+
+document.getElementById('cancelHostBtn').onclick = () => {
+  document.getElementById('addHostForm').style.display = 'none';
+  document.getElementById('newHostName').value = '';
+  document.getElementById('newHostPort').value = '8443';
+};
+
+// On startup: if in app with no configured host, show hosts page; otherwise connect and show sessions
+function startup() {
+  // Hide all pages initially
+  hostPicker.style.display = 'none';
+  sessionPicker.style.display = 'none';
+  log.style.display = 'none';
+
+  if (isApp) {
+    const hosts = loadHosts();
+    if (hosts.length === 0) {
+      // No saved hosts, show hosts page
+      showPage('hosts');
+    } else if (hosts.length === 1) {
+      // One host, connect directly (will show sessions on hello)
+      selectHost(hosts[0].host);
+    } else {
+      // Multiple hosts, let user choose
+      showPage('hosts');
+    }
+  } else {
+    // Running in browser with URL, connect directly (will show sessions on hello)
+    connect();
+  }
+}
 
 function showSessionPicker(sessions) {
   sessionList.innerHTML = '';
@@ -135,19 +310,70 @@ function showSessionPicker(sessions) {
     const btn = document.createElement('button');
     btn.className = 'session-btn';
     const time = new Date(s.lastUsed).toLocaleString();
-    btn.innerHTML = `<div class="time">${time}</div><div class="preview">${s.preview || '(no preview)'}</div>`;
-    btn.onclick = () => selectSession(s.id);
+    btn.innerHTML = `<span class="delete" data-id="${s.id}">×</span><div class="time">${time}</div><div class="preview">${s.preview || '(no preview)'}</div>`;
+    btn.onclick = (e) => {
+      if (e.target.classList.contains('delete')) {
+        e.stopPropagation();
+        const id = e.target.dataset.id;
+        deleteSession(id);
+        return;
+      }
+      selectSession(s.id);
+    };
     sessionList.appendChild(btn);
   }
 
+  hostPicker.style.display = 'none';
   sessionPicker.style.display = 'block';
   log.style.display = 'none';
 }
 
+function deleteSession(id) {
+  // Remove from cached sessions
+  cachedSessions = cachedSessions.filter(s => s.id !== id);
+  // Clear from localStorage if it's the current session
+  if (currentSessionId === id) {
+    currentSessionId = null;
+    localStorage.removeItem('handsfree_session');
+  }
+  // Tell server to delete it
+  if (ws && ws.readyState === 1) {
+    ws.send(JSON.stringify({ type: 'deleteSession', id }));
+  }
+  // Re-render the list
+  showSessionPicker(cachedSessions);
+}
+
+let pendingHistoryLoad = false; // Track if we're waiting for history
+let lastSelectedSession = null; // Prevent duplicate selections
+
 function selectSession(id) {
+  // Prevent duplicate selections that would clear the log
+  if (id && id === lastSelectedSession && log.children.length > 0) {
+    console.log('Session already selected and has content, skipping');
+    return;
+  }
+  lastSelectedSession = id;
   sessionChosen = true;
+  currentSessionId = id;
+  // Persist to localStorage so we can resume after navigating away
+  if (id) {
+    localStorage.setItem('handsfree_session', id);
+  } else {
+    localStorage.removeItem('handsfree_session');
+  }
   sessionPicker.style.display = 'none';
   log.style.display = 'flex';
+  setNavActive('chat');
+
+  // Clear chat log - history will be loaded from server
+  log.innerHTML = '';
+  pendingHistoryLoad = !!id; // Expect history if resuming existing session
+
+  if (!id) {
+    add('status', 'Started new session');
+  }
+
   if (ws && ws.readyState === 1) {
     ws.send(JSON.stringify({ type: 'session', id }));
   }
@@ -167,43 +393,167 @@ function setState(s) { stateEl.textContent = s; }
 
 // ---------------- WebSocket ----------------
 function connect() {
-  ws = new WebSocket(`wss://${location.host}/?key=${encodeURIComponent(KEY)}`);
-  ws.onopen = () => { dot.classList.add('on'); };
+  if (!serverHost) {
+    showHostPicker();
+    return;
+  }
+  // Close existing connection if any
+  if (ws) {
+    try { ws.close(); } catch {}
+    ws = null;
+  }
+  const wsUrl = `wss://${serverHost}/`;
+  console.log('Connecting to:', wsUrl);
+  workdirEl.textContent = 'connecting to ' + serverHost + '…';
+  try {
+    ws = new WebSocket(wsUrl);
+  } catch (err) {
+    console.error('WebSocket creation failed:', err);
+    workdirEl.textContent = 'connection failed: ' + err.message;
+    return;
+  }
+  ws.onopen = () => {
+    console.log('WebSocket connected');
+    dot.classList.add('on');
+  };
+  ws.onerror = (err) => {
+    console.error('WebSocket error:', err);
+    workdirEl.textContent = 'connection error';
+  };
   ws.onclose = () => {
+    console.log('WebSocket closed');
     dot.classList.remove('on');
     workdirEl.textContent = 'disconnected — retrying…';
+    // Don't reset sessionChosen on reconnect - user already picked in this browser session
     setTimeout(connect, 2000);
   };
   ws.onmessage = (ev) => {
     const m = JSON.parse(ev.data);
     if (m.type === 'hello') {
       workdirEl.textContent = m.workdir;
-      // Show session picker if there are previous sessions
-      if (m.sessions && m.sessions.length > 0 && !sessionChosen) {
-        showSessionPicker(m.sessions);
+      cachedSessions = m.sessions || [];
+      const numSessions = cachedSessions.length;
+      console.log('hello: sessions=' + numSessions + ' sessionChosen=' + sessionChosen + ' currentSessionId=' + currentSessionId);
+
+      // Check if we have a saved session from localStorage that still exists on server
+      if (currentSessionId) {
+        const savedSession = cachedSessions.find(s => s.id === currentSessionId);
+        if (savedSession) {
+          // Only select if not already chosen (avoid clearing log on reconnect)
+          if (!sessionChosen) {
+            console.log('Auto-resuming saved session:', currentSessionId);
+            selectSession(currentSessionId);
+          } else {
+            // Already chosen, just re-send session message to server without clearing log
+            console.log('Re-sending session selection after reconnect:', currentSessionId);
+            if (ws && ws.readyState === 1) {
+              ws.send(JSON.stringify({ type: 'session', id: currentSessionId }));
+            }
+            // Show chat view
+            hostPicker.style.display = 'none';
+            sessionPicker.style.display = 'none';
+            log.style.display = 'flex';
+            setNavActive('chat');
+            // Allow history to load if log is empty (e.g., after page refresh)
+            if (log.children.length === 0) {
+              pendingHistoryLoad = true;
+            }
+          }
+          return;
+        } else {
+          // Session no longer exists on server, clear it
+          console.log('Saved session not found on server, clearing');
+          localStorage.removeItem('handsfree_session');
+          currentSessionId = null;
+          sessionChosen = false;
+        }
+      }
+
+      // Show sessions page when connected (unless user already chose a session)
+      if (!sessionChosen) {
+        console.log('Showing sessions page');
+        showSessionPicker(cachedSessions);
+        setNavActive('sessions');
       } else {
-        sessionChosen = true;
+        console.log('Session already chosen, showing chat');
+        setNavActive('chat');
+        hostPicker.style.display = 'none';
+        sessionPicker.style.display = 'none';
         log.style.display = 'flex';
+      }
+    }
+    else if (m.type === 'transcription') {
+      // Handle transcription result from server
+      if (window._transcribeTimeout) {
+        clearTimeout(window._transcribeTimeout);
+        window._transcribeTimeout = null;
+      }
+      console.log('Transcription received:', m.text ? m.text.slice(0, 50) : m.error);
+      if (interimEl) { interimEl.remove(); interimEl = null; }
+      if (m.error) {
+        add('error', m.error);
+        setState('idle');
+      } else if (m.text && m.text.trim()) {
+        sendUser(m.text.trim());
+      } else {
+        setState('idle');
+      }
+    }
+    else if (m.type === 'sessionsUpdated') {
+      // Server confirmed session deletion
+      cachedSessions = m.sessions || [];
+      console.log('Sessions updated from server, count:', cachedSessions.length);
+    }
+    else if (m.type === 'history') {
+      // Server sent conversation history for resumed session
+      const count = m.messages?.length || 0;
+      console.log('Received history:', count, 'messages');
+      // Debug alert disabled
+      // alert('Got ' + count + ' history messages');
+      // Load history if we have messages
+      if (m.messages && m.messages.length > 0) {
+        // Clear log and add messages
+        log.innerHTML = '';
+        for (const msg of m.messages) {
+          add(msg.role === 'user' ? 'user' : 'claude', msg.text);
+        }
+        add('status', 'Loaded ' + count + ' messages');
+        log.scrollTop = log.scrollHeight;
       }
     }
     else if (m.type === 'tool') add('tool', '⚙ ' + m.text);
     else if (m.type === 'status') add('status', m.text);
-    else if (m.type === 'assistant') { add('claude', m.text); lastReply = m.text; if (agentBusy) speakBrief(m.text); }
+    else if (m.type === 'assistant') { console.log('assistant msg:', m.text.slice(0,50)); add('claude', m.text); lastReply = m.text; if (agentBusy) speakBrief(m.text); }
     else if (m.type === 'error') { agentBusy = false; setState('idle'); micBtn.classList.remove('busy'); add('error', m.text); speak('Something went wrong: ' + m.text); }
     else if (m.type === 'result') {
       agentBusy = false; setState('idle'); micBtn.classList.remove('busy');
-      const toSpeak = m.text || lastReply;
-      console.log('result received, toSpeak:', toSpeak, 'ttsUnlocked:', ttsUnlocked);
-      if (toSpeak) { lastReply = toSpeak; speak(toSpeak); }
-      else if (handsFree) startListening();
+      // Update cached sessions if provided
+      if (m.sessions) {
+        cachedSessions = m.sessions;
+        // If this was a new session, save the ID (first in list is most recent)
+        if (!currentSessionId && cachedSessions.length > 0) {
+          currentSessionId = cachedSessions[0].id;
+          localStorage.setItem('handsfree_session', currentSessionId);
+          console.log('Saved new session ID:', currentSessionId);
+        }
+      }
+      // Only speak result.text if provided; lastReply was already spoken via speakBrief
+      if (m.text) { lastReply = m.text; speak(m.text); }
+      else if (handsFree && !ttsSpeaking && ttsQueue.length === 0) startListening();
     }
   };
 }
-connect();
+startup();
+
 
 function sendUser(text) {
   text = text.trim();
   if (!text || !ws || ws.readyState !== 1) return;
+  if (!sessionChosen) {
+    console.warn('sendUser called before session chosen, ignoring');
+    add('error', 'Please select a session first');
+    return;
+  }
   add('user', text);
   ws.send(JSON.stringify({ type: 'user', text }));
   agentBusy = true;
@@ -243,8 +593,29 @@ function float32ToWav(float32Array, sampleRate = 16000) {
 async function initVAD() {
   if (vadReady) return;
   try {
+    console.log('Initializing VAD...');
+    // First request mic permission explicitly
+    try {
+      await navigator.mediaDevices.getUserMedia({ audio: true });
+      console.log('Mic permission granted');
+    } catch (micErr) {
+      console.error('Mic permission denied:', micErr);
+      add('error', 'Microphone permission denied: ' + micErr.message);
+      return;
+    }
+
     myvad = await vad.MicVAD.new({
       onSpeechStart: () => {
+        // Barge-in: cancel TTS and clear queue when user starts speaking
+        if (ttsSpeaking || ttsQueue.length > 0) {
+          if (hasNativeTTS()) {
+            window.AudioBridge.stopSpeaking();
+          } else if ('speechSynthesis' in window) {
+            speechSynthesis.cancel();
+          }
+          ttsQueue.length = 0;
+          ttsSpeaking = false;
+        }
         if (!interimEl) interimEl = add('interim', '');
         interimEl.textContent = '… listening...';
       },
@@ -255,25 +626,39 @@ async function initVAD() {
         if (!interimEl) interimEl = add('interim', '');
         interimEl.textContent = '… transcribing...';
 
+        // Timeout: if no response in 30s, reset state
+        const transcribeTimeout = setTimeout(() => {
+          console.error('Transcription timeout');
+          if (interimEl) { interimEl.remove(); interimEl = null; }
+          add('error', 'Transcription timed out');
+          setState('idle');
+          if (handsFree && !agentBusy) startListening();
+        }, 30000);
+
+        // Store timeout so we can clear it when response arrives
+        window._transcribeTimeout = transcribeTimeout;
+
         try {
           const audioBlob = float32ToWav(audio);
-          const res = await fetch(`/transcribe?key=${encodeURIComponent(KEY)}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'audio/wav' },
-            body: audioBlob,
-          });
-          const result = await res.json();
-          if (interimEl) { interimEl.remove(); interimEl = null; }
-
-          if (result.error) {
-            add('error', result.error);
-            setState('idle');
-          } else if (result.text && result.text.trim()) {
-            sendUser(result.text.trim());
-          } else {
-            setState('idle');
-          }
+          console.log('Audio blob size:', audioBlob.size);
+          // Send audio over WebSocket (fetch fails on Android due to self-signed cert)
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            const base64 = reader.result.split(',')[1];
+            console.log('Sending transcribe request, base64 length:', base64.length);
+            if (ws && ws.readyState === 1) {
+              ws.send(JSON.stringify({ type: 'transcribe', audio: base64 }));
+            } else {
+              clearTimeout(window._transcribeTimeout);
+              if (interimEl) { interimEl.remove(); interimEl = null; }
+              add('error', 'Not connected to server');
+              setState('idle');
+            }
+          };
+          reader.readAsDataURL(audioBlob);
         } catch (err) {
+          clearTimeout(window._transcribeTimeout);
+          console.error('Transcription error:', err);
           if (interimEl) { interimEl.remove(); interimEl = null; }
           add('error', 'Transcription failed: ' + err.message);
           setState('idle');
@@ -284,15 +669,17 @@ async function initVAD() {
       baseAssetPath: "https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.29/dist/",
     });
     vadReady = true;
+    console.log('VAD initialized successfully');
   } catch (err) {
-    add('error', 'VAD init failed: ' + err.message);
+    console.error('VAD init failed:', err);
+    add('error', 'VAD init failed: ' + (err.message || err));
+    setState('idle');
   }
 }
 
 async function startListening() {
   if (listening) return;
   unlockTTS();
-  speechSynthesis.cancel();
 
   if (!vadReady) {
     setState('loading VAD...');
@@ -331,76 +718,136 @@ function speakable(text) {
 let ttsUnlocked = false;
 let lastReply = '';
 
+// Check if native Android TTS is available (check dynamically since bridge may load late)
+function hasNativeTTS() {
+  const has = !!(window.AudioBridge && typeof window.AudioBridge.speak === 'function');
+  console.log('hasNativeTTS check:', has, 'AudioBridge:', !!window.AudioBridge);
+  return has;
+}
+
 // Browsers refuse to play audio that wasn't initiated by a user gesture.
 // Speaking a silent utterance inside the first tap unlocks TTS for the
 // replies that arrive later over the WebSocket.
 function unlockTTS() {
-  if (ttsUnlocked || !('speechSynthesis' in window)) return;
+  if (ttsUnlocked) return;
   ttsUnlocked = true;
-  const u = new SpeechSynthesisUtterance(' ');
-  u.volume = 0;
-  speechSynthesis.speak(u);
-  setTimeout(() => {
-    if (speechSynthesis.getVoices().length === 0)
-      add('error', 'No text-to-speech voices in this browser, so replies will be silent. Linux: install speech-dispatcher + espeak-ng (or use Chrome). iPhone: check the mute switch.');
-  }, 3000);
+  if (!hasNativeTTS() && 'speechSynthesis' in window) {
+    const u = new SpeechSynthesisUtterance(' ');
+    u.volume = 0;
+    speechSynthesis.speak(u);
+    setTimeout(() => {
+      if (speechSynthesis.getVoices().length === 0)
+        add('error', 'No text-to-speech voices in this browser, so replies will be silent. Linux: install speech-dispatcher + espeak-ng (or use Chrome). iPhone: check the mute switch.');
+    }, 3000);
+  }
 }
 
 let speakTimeout = null;
+let ttsQueue = [];
+let ttsSpeaking = false;
+
+// Called from native Android when TTS finishes
+window.onNativeTTSDone = function() {
+  ttsSpeaking = false;
+  speakNext();
+};
+
+function speakNext() {
+  if (ttsQueue.length === 0) {
+    ttsSpeaking = false;
+    if (!agentBusy) setState('idle');
+    if (handsFree && !listening && !agentBusy) startListening();
+    return;
+  }
+  ttsSpeaking = true;
+  const clean = ttsQueue.shift();
+  setState(agentBusy ? 'working' : 'speaking');
+  // Start VAD during TTS for barge-in detection
+  if (handsFree && !listening) startListening();
+
+  if (hasNativeTTS()) {
+    // Use native Android TTS
+    console.log('Speaking via native TTS:', clean.slice(0, 50));
+    window.AudioBridge.speak(clean);
+  } else if ('speechSynthesis' in window) {
+    // Fall back to Web Speech API
+    const u = new SpeechSynthesisUtterance(clean);
+    u.rate = 1.05;
+    // Desktop Chrome silently stalls long utterances after ~15s unless nudged.
+    const keepAlive = setInterval(() => {
+      if (speechSynthesis.speaking) speechSynthesis.resume();
+      else clearInterval(keepAlive);
+    }, 5000);
+    u.onend = () => { clearInterval(keepAlive); speakNext(); };
+    u.onerror = () => { clearInterval(keepAlive); speakNext(); };
+    speechSynthesis.speak(u);
+  } else {
+    // No TTS available, skip to next
+    speakNext();
+  }
+}
+
+let lastQueued = '';
 function speakRaw(clean) {
-  if (!clean || !('speechSynthesis' in window)) {
+  if (!clean) {
     if (handsFree && !agentBusy) startListening();
     return;
   }
-  clearTimeout(speakTimeout);
-  speechSynthesis.cancel(); // a newer update supersedes whatever is mid-sentence
-  // Chrome bug: calling speak() immediately after cancel() can silently fail.
-  // A short delay lets the browser finish the cancellation before we queue new audio.
-  speakTimeout = setTimeout(() => {
-  const u = new SpeechSynthesisUtterance(clean);
-  u.rate = 1.05;
-  const finish = () => {
-    clearInterval(keepAlive);
-    if (!agentBusy) setState('idle');
-    // only reopen the mic at end of turn, not after progress updates
-    if (handsFree && !listening && !agentBusy) startListening();
-  };
-  u.onend = finish;
-  u.onerror = finish;
-  setState(agentBusy ? 'working' : 'speaking');
-  // Desktop Chrome silently stalls long utterances after ~15s unless nudged.
-  const keepAlive = setInterval(() => {
-    if (speechSynthesis.speaking) speechSynthesis.resume();
-    else clearInterval(keepAlive);
-  }, 5000);
-  speechSynthesis.speak(u);
-  }, 50);
+  if (!hasNativeTTS() && !('speechSynthesis' in window)) {
+    if (handsFree && !agentBusy) startListening();
+    return;
+  }
+  // Skip if this is the same text we just queued (prevents duplicates)
+  if (clean === lastQueued) {
+    console.log('speakRaw SKIPPED duplicate:', clean.slice(0, 50));
+    return;
+  }
+  console.log('speakRaw QUEUING:', clean.slice(0, 50), 'queue length:', ttsQueue.length);
+  lastQueued = clean;
+  ttsQueue.push(clean);
+  if (!ttsSpeaking) {
+    speakNext();
+  }
 }
+
+// Track sentences we've already spoken so we don't repeat them
+let spokenSentences = new Set();
 
 // Full reply, spoken at end of turn.
 function speak(text) {
   const clean = speakable(text).slice(0, 2000);
-  console.log('speak() called, clean text length:', clean.length, 'ttsUnlocked:', ttsUnlocked);
-  speakRaw(clean);
+  // Split into sentences and only speak ones we haven't said yet
+  const sentences = clean.split(/(?<=[.!?])\s+/);
+  const newSentences = sentences.filter(s => !spokenSentences.has(s));
+  if (newSentences.length > 0) {
+    const toSpeak = newSentences.join(' ');
+    console.log('speak() queuing new sentences:', toSpeak.slice(0, 50));
+    speakRaw(toSpeak);
+  }
+  // Clear for next turn
+  spokenSentences.clear();
 }
 
 // Progress narration while the agent works: first sentence, kept short.
 function speakBrief(text) {
   const clean = speakable(text);
   if (!clean) return;
-  speakRaw(clean.split(/(?<=[.!?])\s+/)[0].slice(0, 180));
+  const firstSentence = clean.split(/(?<=[.!?])\s+/)[0].slice(0, 180);
+  spokenSentences.add(firstSentence);
+  speakRaw(firstSentence);
 }
 
 // ---------------- Controls ----------------
 micBtn.onclick = () => { unlockTTS(); listening ? stopListening() : startListening(); };
 
-document.getElementById('speakBtn').onclick = () => {
-  unlockTTS();
-  speak(lastReply || 'Text to speech is working. Ask me something and I will read the answer out loud.');
-};
-
 stopBtn.onclick = () => {
-  speechSynthesis.cancel();
+  if (hasNativeTTS()) {
+    window.AudioBridge.stopSpeaking();
+  } else if ('speechSynthesis' in window) {
+    speechSynthesis.cancel();
+  }
+  ttsQueue.length = 0;
+  ttsSpeaking = false;
   stopListening();
   if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'interrupt' }));
   agentBusy = false;
@@ -412,14 +859,33 @@ autoBtn.onclick = () => {
   unlockTTS();
   handsFree = !handsFree;
   autoBtn.classList.toggle('on', handsFree);
-  if (handsFree) startListening();
-  else stopListening();
+  if (handsFree) {
+    // Start Android foreground service if available (keeps mic alive in background)
+    try {
+      if (window.AudioBridge && typeof window.AudioBridge.startAudioService === 'function') {
+        window.AudioBridge.startAudioService();
+      }
+    } catch (e) { console.log('AudioBridge not available:', e); }
+    startListening();
+  } else {
+    try {
+      if (window.AudioBridge && typeof window.AudioBridge.stopAudioService === 'function') {
+        window.AudioBridge.stopAudioService();
+      }
+    } catch (e) { console.log('AudioBridge not available:', e); }
+    stopListening();
+  }
 };
 
 document.getElementById('sendBtn').onclick = () => { unlockTTS(); sendUser(textInput.value); textInput.value = ''; };
 textInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') { unlockTTS(); sendUser(textInput.value); textInput.value = ''; }
 });
+
+// Navigation click handlers
+navHosts.onclick = () => showPage('hosts');
+navSessions.onclick = () => showPage('sessions');
+navChat.onclick = () => showPage('chat');
 </script>
 </body>
 </html>
