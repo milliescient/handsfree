@@ -28,13 +28,11 @@ echo "Built handsfree.apk version $GIT_SHA"
 
 # Restart server so it picks up the same git SHA
 echo "Restarting server..."
-# Kill both the supervisor (run.sh) and the node server to avoid duplicates
-pkill -f "run.sh" 2>/dev/null || true
-pkill -f "node.*server.js" 2>/dev/null || true
-sleep 2
-# Start fresh with supervisor
-nohup ./run.sh >> /dev/null 2>&1 &
-sleep 2
+# Kill only the node process by port; the always-running supervisor (run.sh)
+# restarts it with the new code. Never pkill run.sh or launch a new one here —
+# see CLAUDE.md "Server process management".
+fuser -k 8443/tcp 2>/dev/null || true
+sleep 3
 
 echo "Server restarted with version $GIT_SHA"
 echo "APK available at: public/handsfree.apk"
