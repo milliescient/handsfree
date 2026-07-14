@@ -1010,23 +1010,29 @@ async function doInitVAD() {
       preSpeechPadFrames: 5,
       submitUserSpeechOnPause: true,  // Push-to-talk: releasing mid-speech still submits
       onSpeechStart: () => {
-        // Duck playback right away so barge-in feels instant; the hard stop
-        // waits for a few confirmed loud frames (onFrameProcessed below).
+        // Don't duck or show the listening bubble yet: quiet ambient noise
+        // (birds outside) trips the raw VAD constantly. Both reactions wait
+        // for a couple of confirmed LOUD speech frames (onFrameProcessed).
         console.log('onSpeechStart fired, tts.speaking=' + tts.speaking);
-        if (tts.speaking) tts.duck(true);
-        if (!interimEl) { interimEl = add('interim', ''); pinBottomEls(); }
-        interimEl.textContent = '… listening...';
       },
-      // Early barge-in: stop playback after ~4 consecutive frames (~130ms) of
-      // high-probability, loud speech instead of waiting for the utterance to
-      // end. The VAD keeps running so onSpeechEnd still gets the full audio.
+      // React to loud, high-probability speech frames:
+      //  ~2 frames (~60ms): duck playback + show the listening bubble —
+      //    this is a person, not a bird.
+      //  ~4 frames (~130ms) during playback: hard-stop for the barge-in.
+      // The VAD keeps running so onSpeechEnd still gets the full audio.
       onFrameProcessed: (probs, frame) => {
-        if (!tts.speaking) { bargeFrames = 0; return; }
         let e = 0;
         for (let i = 0; i < frame.length; i++) e += frame[i] * frame[i];
         e = Math.sqrt(e / frame.length);
-        if (probs.isSpeech > 0.7 && e > 0.03) {
-          if (++bargeFrames >= 4) {
+        // Match onSpeechEnd's energy gates: stricter during playback.
+        if (probs.isSpeech > 0.7 && e > (tts.speaking ? 0.03 : 0.01)) {
+          bargeFrames++;
+          if (bargeFrames === 2) {
+            if (tts.speaking) tts.duck(true);
+            if (!interimEl) { interimEl = add('interim', ''); pinBottomEls(); }
+            interimEl.textContent = '… listening...';
+          }
+          if (tts.speaking && bargeFrames >= 4) {
             bargeFrames = 0;
             console.log('Early barge-in, frame energy:', e.toFixed(4));
             if (ws && ws.readyState === 1) {
