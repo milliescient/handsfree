@@ -546,6 +546,27 @@ function clearQueuedLook(el) {
   el.classList.remove('queued', 'q-edit');
   el.querySelector('.queued-minus')?.remove();
 }
+// Reconcile queued bubbles against the latest agentd queue snapshot. Freshly
+// sent messages get a grace period (their snapshot may still be in flight);
+// a deferred re-check catches bubbles whose grace outlived the last snapshot,
+// so nothing stays dimmed forever.
+let lastQueueSnapshot = null;
+let queueReconcileTimer = null;
+function reconcileQueue() {
+  if (!lastQueueSnapshot) return;
+  const inQueue = new Set(lastQueueSnapshot);
+  let deferred = false;
+  queuedEls = queuedEls.filter(el => {
+    const text = el.firstChild ? el.firstChild.nodeValue : '';
+    if (inQueue.has(text)) return true;
+    if (Date.now() - (el._qtime || 0) < 4000) { deferred = true; return true; }
+    clearQueuedLook(el);
+    return false;
+  });
+  clearTimeout(queueReconcileTimer);
+  if (deferred) queueReconcileTimer = setTimeout(reconcileQueue, 4200);
+  if (queuedEls.length === 0 && queueEditMode) setQueueEditMode(false);
+}
 function markQueued(el) {
   el.classList.add('queued');
   el._qtime = Date.now(); // grace period before queue snapshots may clear it
@@ -798,17 +819,8 @@ function connect() {
       // Authoritative queue snapshot from agentd. Any bubble still claiming
       // to be queued that the agent no longer has is running, was removed on
       // another device, or lost a dedup race — stop showing it as queued.
-      // Freshly sent messages get a grace period: their snapshot may still be
-      // in flight.
-      const inQueue = new Set(m.queued || []);
-      queuedEls = queuedEls.filter(el => {
-        const text = el.firstChild ? el.firstChild.nodeValue : '';
-        if (inQueue.has(text)) return true;
-        if (Date.now() - (el._qtime || 0) < 4000) return true;
-        clearQueuedLook(el);
-        return false;
-      });
-      if (queuedEls.length === 0 && queueEditMode) setQueueEditMode(false);
+      lastQueueSnapshot = m.queued || [];
+      reconcileQueue();
     }
     else if (m.type === 'dropped') {
       // Our copy of the utterance was deduplicated away (another client's
@@ -1109,6 +1121,19 @@ function stopListening() {
   micBtn.classList.remove('listening');
   if (interimEl) { interimEl.remove(); interimEl = null; }
   setState('idle');
+}
+
+// A background browser tab must not keep transcribing the room: it doubles
+// every utterance the visible client hears. The app keeps listening when the
+// screen is off — that's hands-free working as intended.
+if (!isApp) {
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      if (listening) stopListening();
+    } else if (handsFree && !agentBusy && !tts.speaking) {
+      startListening();
+    }
+  });
 }
 
 // ---------------- Text to speech ----------------
