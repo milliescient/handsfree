@@ -27,6 +27,14 @@ if ! command -v npm &> /dev/null; then
 fi
 echo "✓ npm $(npm -v)"
 
+# Check openssl (used to generate the self-signed HTTPS certificate)
+if command -v openssl &> /dev/null; then
+    echo "✓ openssl found (self-signed cert generates on first run)"
+else
+    echo "WARNING: openssl not found — the server can't generate its HTTPS"
+    echo "  certificate, and browsers need HTTPS for microphone access."
+fi
+
 # Install npm dependencies
 echo
 echo "Installing npm dependencies..."
@@ -74,6 +82,17 @@ else
     echo "NOTE: OPENAI_API_KEY not set (local Whisper only, or text input)"
 fi
 
+# Check for local TTS (Piper) server
+TTS_URL="${TTS_URL:-http://127.0.0.1:9877/synthesize}"
+if curl -s --connect-timeout 1 "${TTS_URL%/synthesize}" > /dev/null 2>&1; then
+    echo "✓ Local TTS server found at $TTS_URL"
+else
+    echo "NOTE: No local TTS server at $TTS_URL"
+    echo "  Replies will use the browser/phone's built-in voices instead."
+    echo "  For nicer audio, run Piper behind a small HTTP wrapper:"
+    echo "  https://github.com/rhasspy/piper"
+fi
+
 # Create .env file if it doesn't exist
 if [ ! -f .env ]; then
     echo
@@ -88,6 +107,9 @@ if [ ! -f .env ]; then
 # Optional: local Whisper server URL (default http://127.0.0.1:9876/transcribe)
 # WHISPER_URL=http://127.0.0.1:9876/transcribe
 
+# Optional: local TTS (Piper) server URL (default http://127.0.0.1:9877/synthesize)
+# TTS_URL=http://127.0.0.1:9877/synthesize
+
 # Optional: port (default 8443)
 # PORT=8443
 EOF
@@ -97,9 +119,8 @@ fi
 echo
 echo "=== Setup Complete ==="
 echo
-echo "To start the server:"
-echo "  node server.js /path/to/your/project"
-echo
-echo "Or use the run script:"
+echo "Start everything (web server + agent daemon, supervised):"
 echo "  ./run.sh /path/to/your/project"
+echo
+echo "Then open the printed https:// URL on your phone or browser."
 echo

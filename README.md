@@ -2,48 +2,19 @@
 
 A fully hands-free voice interface for Claude Code. Talk to an agent from your
 phone (or any browser); it works in your project directory with all permission
-prompts bypassed, and reads its replies back to you out loud.
+prompts bypassed, and reads its replies back to you out loud. Queue follow-up
+requests while it works, barge in mid-sentence to interrupt, and watch a live
+feed of every command and file edit it makes.
 
 Built on the [Claude Agent SDK](https://docs.claude.com/en/api/agent-sdk/typescript) —
-one Node server, one HTML page, no build step.
+two small Node processes, one HTML page, no build step (the optional Android
+app is the only thing that compiles).
 
-## How it works
-
-- `server.js` serves the UI over self-signed HTTPS (browsers require a secure
-  context for microphone access on non-localhost hosts) and bridges a
-  WebSocket to `query()` from `@anthropic-ai/claude-agent-sdk`.
-- Each browser connection is one continuous Claude session (`resume` carries
-  context between turns). Messages spoken while the agent is working are queued.
-- The agent runs with `permissionMode: "bypassPermissions"` and a system-prompt
-  append that tells it to keep spoken replies short and never ask for
-  confirmation.
-- Voice input uses [Silero VAD](https://github.com/snakers4/silero-vad) for
-  voice activity detection and Whisper for transcription. If you have a local
-  [faster-whisper](https://github.com/SYSTRAN/faster-whisper) server running,
-  it uses that (fast, free, private); otherwise falls back to OpenAI's API.
-  Tap the mic to talk; replies are spoken via the browser's TTS. Toggle
-  **🎧 hands-free** and the mic automatically reopens every time Claude finishes
-  speaking — a full voice loop with no touching.
-- The transcript pane shows everything in full (including a live feed of tool
-  calls: which commands and file edits the agent is making), so you can glance
-  at your phone to see what it's actually doing. **■** interrupts the agent
-  mid-task.
-
-## Setup
+## Quick start
 
 ```bash
-./setup.sh                            # install dependencies, check config
-export OPENAI_API_KEY=sk-...          # for Whisper voice transcription
-node server.js /path/to/your/project  # the directory Claude will work in
-```
-
-Or manually:
-
-```bash
-npm install
-export ANTHROPIC_API_KEY=sk-ant-...   # if not already authenticated
-export OPENAI_API_KEY=sk-...          # for Whisper voice transcription
-node server.js /path/to/your/project  # the directory Claude will work in
+./setup.sh                    # install dependencies, check configuration
+./run.sh /path/to/your/project
 ```
 
 The server prints URLs like:
@@ -54,21 +25,82 @@ Open on your phone:    https://192.168.1.20:8443/
 ```
 
 Open the phone URL (same Wi-Fi network), tap through the self-signed
-certificate warning once, allow microphone access, and talk.
+certificate warning once, allow microphone access, and talk. A certificate is
+generated automatically on first run (requires `openssl`).
 
 Auth note: the SDK spawns the Claude Code CLI under the hood, so if this
 machine is already logged in to Claude Code it will generally just work;
 otherwise set `ANTHROPIC_API_KEY`.
 
-### Options
+## Architecture
+
+`run.sh` supervises two processes that restart independently:
+
+- **`server.js`** — serves the UI over self-signed HTTPS on port 8443
+  (browsers require a secure context for mic access on non-localhost hosts),
+  relays speech-to-text and text-to-speech, and bridges browser WebSockets to
+  the agent daemon. Safe to restart at any time; no agent work is lost.
+- **`agentd.js`** — a loopback-only daemon (port 9878) that owns the actual
+  Claude sessions via `query()` from the Agent SDK. Turns survive web-server
+  restarts and client disconnects. Messages that arrive while a turn is
+  running are queued and run in order. On SIGHUP it finishes the queue, then
+  exits so the supervisor restarts it with fresh code.
+
+The agent runs with `permissionMode: "bypassPermissions"` and a system-prompt
+append that keeps spoken replies short and conversational.
+
+## Speech engines (both optional, with fallbacks)
+
+| Role | Local server | Fallback |
+| --- | --- | --- |
+| Transcription (Whisper) | `WHISPER_URL` (default `http://127.0.0.1:9876/transcribe`), e.g. [faster-whisper](https://github.com/SYSTRAN/faster-whisper) behind a tiny HTTP wrapper | OpenAI Whisper API if `OPENAI_API_KEY` is set; otherwise use the text box |
+| Speech synthesis | `TTS_URL` (default `http://127.0.0.1:9877/synthesize`), e.g. [Piper](https://github.com/rhasspy/piper) — POST `{"text": ...}`, returns a WAV | The browser/phone's built-in text-to-speech |
+
+Voice activity detection runs in the page itself
+([Silero VAD](https://github.com/snakers4/silero-vad) via
+[vad-web](https://github.com/ricky0123/vad), loaded from a CDN), so nothing
+extra is needed for the mic to work.
+
+## The Android app (optional)
+
+The plain browser page works fine on Android Chrome. The Capacitor app in
+`android/` adds the things a browser can't do: a foreground service that keeps
+the mic and audio alive with the screen off, and reconnect behavior tuned for
+walking around the house.
+
+Building it needs an Android SDK and Java toolchain:
+
+```bash
+./build-apk.sh   # stamps the git SHA into the page, gradle assembleDebug
+```
+
+The APK lands at `public/handsfree.apk`, so once built it is served by the
+web server itself — open the page on your phone and tap the version footer to
+download and install the update. The APK is not checked into git (75 MB);
+without an Android SDK, just use the browser.
+
+## Development loop
+
+```bash
+./deploy.sh "what changed"
+```
+
+Commits nothing by itself — it rebuilds the APK at HEAD, restarts the web
+server (free), and SIGHUPs the agent daemon so it restarts with new code once
+its queue drains. Client (`public/index.html`) changes require reinstalling
+the APK on the phone; server changes take effect immediately.
+
+## Options
 
 | What | How |
 | --- | --- |
-| Working directory | first CLI arg, or `WORKDIR` env var (default: cwd) |
+| Working directory | first CLI arg to `run.sh`/`server.js`, or `WORKDIR` env var (default: cwd) |
 | Port | `PORT` env var (default 8443) |
 | Local Whisper | `WHISPER_URL` env var (default `http://127.0.0.1:9876/transcribe`) |
+| Local TTS | `TTS_URL` env var (default `http://127.0.0.1:9877/synthesize`) |
+| Agent daemon address | `AGENTD_URL` env var (default `ws://127.0.0.1:9878`) |
 
-### Off your home network
+## Off your home network
 
 The LAN URL only works on the same Wi-Fi. For phone access from anywhere, use
 [Tailscale](https://tailscale.com) and open `https://<tailscale-ip>:8443/`.
@@ -78,17 +110,16 @@ Avoid exposing the port to the public internet.
 
 This grants **unattended agent control of the machine** (no permission
 prompts) to anyone who can reach port 8443 — there is currently **no
-authentication at all** (the earlier URL-token lock was removed when the
-Android app was introduced). The only protections are network-level: keep
-the port firewalled off the LAN and reach it exclusively over Tailscale
-(or another private overlay). Never port-forward it or run it on a network
-you don't control.
+authentication at all**. The only protections are network-level: keep the
+port firewalled off the LAN and reach it exclusively over Tailscale (or
+another private overlay). Never port-forward it or run it on a network you
+don't control.
 
 ## If you don't hear anything
 
-Replies are spoken with the browser's built-in text-to-speech. Tap **🔊** in
-the header — it replays the last reply, or speaks a test phrase. If the test
-phrase is silent:
+Server-side TTS needs the local synthesis server above; without it, replies
+use the browser's built-in voices. Tap **🔊** in the header — it replays the
+last reply, or speaks a test phrase. If the test phrase is silent:
 
 - **Desktop Linux**: Chromium and Firefox ship with no TTS voices. Install
   `speech-dispatcher` and `espeak-ng` and restart the browser, or use Chrome
@@ -101,7 +132,7 @@ phrase is silent:
 
 ## Browser support
 
-- **Android Chrome**: full support (best experience).
+- **Android**: the app, or Chrome (full support).
 - **iOS Safari 14.5+**: supported; speech recognition can be less reliable.
   The text box always works as a fallback.
 - **Desktop Chrome/Edge**: full support.
