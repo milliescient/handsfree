@@ -213,8 +213,10 @@ function saveSessions(sessions) {
   try { writeFileSync(SESSIONS_FILE, JSON.stringify(sessions, null, 2)); } catch {}
 }
 
-// Load conversation history from SDK session file
-function loadSessionHistory(sessionId, maxMessages = 20) {
+// Load conversation history from SDK session file. Includes tool-use entries
+// formatted the same way agentd streams them live, so a reloaded chat looks
+// exactly like it did when the app was closed.
+function loadSessionHistory(sessionId, maxMessages = 200) {
   const homeDir = process.env.HOME || process.env.USERPROFILE;
   const projectPath = WORKDIR.replace(/\//g, '-');
   const sessionFile = path.join(homeDir, '.claude', 'projects', projectPath, `${sessionId}.jsonl`);
@@ -227,23 +229,28 @@ function loadSessionHistory(sessionId, maxMessages = 20) {
     for (const line of lines) {
       try {
         const entry = JSON.parse(line);
-        if (entry.type === 'user' && entry.message?.content) {
-          // User message - extract text
-          const text = entry.message.content
-            .filter(b => b.type === 'text')
-            .map(b => b.text)
-            .join('\n');
+        if (entry.type === 'user' && entry.message?.content && !entry.isMeta) {
+          // User message - extract text (content may be a plain string)
+          const content = entry.message.content;
+          const text = typeof content === 'string'
+            ? content
+            : content.filter(b => b.type === 'text').map(b => b.text).join('\n');
           if (text.trim()) {
-            messages.push({ role: 'user', text: text.slice(0, 500) });
+            messages.push({ role: 'user', text });
           }
-        } else if (entry.type === 'assistant' && entry.message?.content) {
-          // Assistant message - extract text only (skip tool calls)
-          const text = entry.message.content
-            .filter(b => b.type === 'text')
-            .map(b => b.text)
-            .join('\n');
-          if (text.trim()) {
-            messages.push({ role: 'assistant', text: text.slice(0, 1000) });
+        } else if (entry.type === 'assistant' && Array.isArray(entry.message?.content)) {
+          // Assistant blocks in order: text and tool calls interleaved, one
+          // entry per block — matching how agentd emits them live.
+          for (const b of entry.message.content) {
+            if (b.type === 'text' && b.text.trim()) {
+              messages.push({ role: 'assistant', text: b.text });
+            } else if (b.type === 'tool_use') {
+              const input = b.input || {};
+              const detail =
+                input.command || input.description || input.file_path ||
+                input.pattern || input.query || input.prompt || '';
+              messages.push({ role: 'tool', text: `${b.name} ${String(detail).slice(0, 120)}`.trim() });
+            }
           }
         }
       } catch {}
@@ -348,6 +355,17 @@ let nextConnId = 1;
 let lastUserKey = null; // dedup identical user messages from parallel clients
 let lastUserAt = 0;
 
+// Mirror of agentd's job queue (texts only), so a client that reloads mid-turn
+// can still render its queued-but-not-started messages. Persisted to disk
+// because this server restarts on every deploy while agentd keeps draining.
+const QUEUE_FILE = path.join(__dirname, '.queue.json');
+let pendingQueue = (() => {
+  try { return JSON.parse(readFileSync(QUEUE_FILE, 'utf8')); } catch { return []; }
+})();
+function savePendingQueue() {
+  try { writeFileSync(QUEUE_FILE, JSON.stringify(pendingQueue)); } catch {}
+}
+
 function sendToAgent(obj) {
   const s = JSON.stringify(obj);
   if (agentWs && agentWs.readyState === WebSocket.OPEN) agentWs.send(s);
@@ -367,6 +385,8 @@ async function handleAgentEvent(evt) {
   if (evt.type === 'ready') {
     agentBusy = !!evt.busy;
     console.log(`agentd ready (busy=${evt.busy}, queued=${evt.queued}, draining=${evt.draining})`);
+    // Reconcile our queue mirror with agentd's actual queue depth
+    if (!evt.queued && pendingQueue.length) { pendingQueue = []; savePendingQueue(); }
   } else if (evt.type === 'sessionStarted') {
     const conn = conns.get(evt.connId);
     if (conn) conn.sessionId = evt.sessionId;
@@ -380,7 +400,10 @@ async function handleAgentEvent(evt) {
   } else if (evt.type === 'status') {
     broadcast({ type: 'status', text: evt.text });
   } else if (evt.type === 'result') {
-    agentBusy = false;
+    // A finished turn hands off to the next queued job (if any): it leaves the
+    // queue mirror and the agent stays busy working on it.
+    if (pendingQueue.length) { pendingQueue.shift(); savePendingQueue(); agentBusy = true; }
+    else agentBusy = false;
     broadcast({ type: 'result', ok: evt.ok, text: evt.text, sessions: evt.sessions });
   } else if (evt.type === 'error') {
     agentBusy = false;
@@ -445,8 +468,9 @@ wss.on('connection', (ws) => {
         // Always send history on explicit selection: the client clears its
         // log expecting it, and the history handler is idempotent.
         const history = loadSessionHistory(conn.sessionId);
-        console.log(`Loaded ${history.length} messages from session history`);
-        send({ type: 'history', messages: history });
+        const queued = pendingQueue.filter(q => q.sessionId === conn.sessionId).map(q => q.text);
+        console.log(`Loaded ${history.length} messages from session history (${queued.length} queued)`);
+        send({ type: 'history', messages: history, queued });
       } else {
         console.log('Client starting new session');
         send({ type: 'status', text: 'Starting new session...' });
@@ -476,6 +500,12 @@ wss.on('connection', (ws) => {
       }
       lastUserKey = dedupKey;
       lastUserAt = Date.now();
+      // Busy means this message waits in agentd's queue — remember it so a
+      // reloading client can still see its queued bubble.
+      if (agentBusy) {
+        pendingQueue.push({ sessionId: conn.sessionId, text });
+        savePendingQueue();
+      }
       agentBusy = true;
       if (!agentWs || agentWs.readyState !== WebSocket.OPEN) {
         send({ type: 'status', text: 'agent is restarting — your message is queued' });

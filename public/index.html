@@ -678,16 +678,29 @@ function connect() {
       if (ws && ws.readyState === 1) {
         ws.send(JSON.stringify({ type: 'debug', msg: 'Client received history: ' + count + ' messages' }));
       }
-      // Load history if we have messages
-      if (m.messages && m.messages.length > 0) {
-        // Clear log and add messages
+      // Rebuild the chat exactly as it looked before: messages, tool
+      // activity lines, and any still-queued bubbles pinned at the bottom.
+      const queued = m.queued || [];
+      if (count > 0 || queued.length > 0) {
         log.innerHTML = '';
         queuedEls = [];
-        for (const msg of m.messages) {
-          add(msg.role === 'user' ? 'user' : 'claude', msg.text);
+        for (const msg of m.messages || []) {
+          if (msg.role === 'user') add('user', msg.text);
+          else if (msg.role === 'tool') add('tool', '⚙ ' + msg.text);
+          else add('claude', msg.text);
         }
-        add('status', 'Loaded ' + count + ' messages');
+        for (const q of queued) {
+          const el = add('user', q);
+          el.classList.add('queued');
+          const note = document.createElement('div');
+          note.className = 'queued-note';
+          note.textContent = 'queued — still working on the last request';
+          el.appendChild(note);
+          queuedEls.push(el);
+        }
+        if (queued.length > 0) { agentBusy = true; micBtn.classList.add('busy'); }
         if (agentBusy) showWorking();
+        pinBottomEls();
         scrollLog();
         // Debug: report final state
         if (ws && ws.readyState === 1) {
