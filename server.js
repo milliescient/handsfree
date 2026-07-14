@@ -317,6 +317,9 @@ const server = createServer(loadOrCreateCert(), async (req, res) => {
   } else if (url.pathname === '/sessions' && req.method === 'GET') {
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify(loadSessions()));
+  } else if (url.pathname === '/version' && req.method === 'GET') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ version: APP_VERSION }));
   } else if (url.pathname === '/usage' && req.method === 'GET') {
     const usage = loadUsage();
     const minutes = (usage.whisperSeconds / 60).toFixed(2);
