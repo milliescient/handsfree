@@ -427,6 +427,10 @@ let pendingHistoryLoad = false; // Track if we're waiting for history
 let lastSelectedSession = null; // Prevent duplicate selections
 
 function selectSession(id) {
+  // Debug: send to server
+  if (ws && ws.readyState === 1) {
+    ws.send(JSON.stringify({ type: 'debug', msg: 'selectSession called: id=' + id + ' lastSelected=' + lastSelectedSession + ' children=' + log.children.length }));
+  }
   // Prevent duplicate selections that would clear the log
   if (id && id === lastSelectedSession && log.children.length > 0) {
     console.log('Session already selected and has content, skipping');
