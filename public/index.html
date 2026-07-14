@@ -35,6 +35,7 @@
   #log { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
   .msg { max-width: 88%; padding: 10px 14px; border-radius: 14px; white-space: pre-wrap; word-break: break-word; }
   .user { align-self: flex-end; background: var(--accent); color: #fff; border-bottom-right-radius: 4px; }
+  .msg.queued { opacity: .55; }
   .claude { align-self: flex-start; background: var(--panel); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
   .tool, .status { align-self: flex-start; font-size: 12px; color: var(--dim); padding: 0 4px; font-family: ui-monospace, monospace; }
   .error { align-self: flex-start; color: var(--err); font-size: 13px; padding: 0 4px; }
@@ -60,14 +61,14 @@
   #mic.busy { background: var(--panel); border: 2px solid var(--accent); }
   #mic.locked { background: var(--panel); border: 2px solid var(--accent); color: var(--accent); }
   #lockHint {
-    position: absolute; left: 50%; bottom: 100px; transform: translateX(-50%);
-    width: 48px; height: 48px; border-radius: 50%; z-index: 5;
+    position: absolute; left: 16px; top: 50%; transform: translateY(-50%);
+    width: 52px; height: 52px; border-radius: 50%;
     background: var(--panel); border: 1px solid var(--border);
     display: flex; align-items: center; justify-content: center; font-size: 22px;
     opacity: 0; pointer-events: none; transition: opacity .15s, transform .15s, border-color .15s;
   }
   #lockHint.show { opacity: 1; }
-  #lockHint.near { border-color: var(--accent); transform: translateX(-50%) scale(1.2); }
+  #lockHint.near { border-color: var(--accent); transform: translateY(-50%) scale(1.2); }
   @keyframes pulse {
     0%, 100% { box-shadow: 0 0 0 0 rgba(217, 119, 87, .5); }
     50% { box-shadow: 0 0 0 16px rgba(217, 119, 87, 0); }
@@ -479,14 +480,22 @@ function selectSession(id) {
   }
 }
 
+// User messages sent while the agent is busy are queued; keep their bubbles
+// pinned at the very bottom of the chat (below the working indicator).
+let queuedEls = [];
+function pinBottomEls() {
+  if (workingEl && workingEl.parentNode === log) log.appendChild(workingEl);
+  for (const el of queuedEls) log.appendChild(el);
+}
+
 function add(cls, text) {
   const el = document.createElement('div');
   el.className = 'msg ' + cls;
   if (cls === 'tool' || cls === 'status' || cls === 'error' || cls === 'interim') el.className = cls;
   el.textContent = text;
   log.appendChild(el);
-  // Keep the working indicator below the newest message
-  if (workingEl && workingEl.parentNode === log) log.appendChild(workingEl);
+  // Keep the working indicator and queued messages below the newest message
+  if (!queuedEls.includes(el)) pinBottomEls();
   log.scrollTop = log.scrollHeight;
   return el;
 }
@@ -514,6 +523,7 @@ function showWorking() {
   if (workingTimer) clearInterval(workingTimer);
   workingTimer = setInterval(pick, 4000);
   log.appendChild(workingEl);
+  pinBottomEls();
   log.scrollTop = log.scrollHeight;
 }
 function hideWorking() {
@@ -662,6 +672,7 @@ function connect() {
       if (m.messages && m.messages.length > 0) {
         // Clear log and add messages
         log.innerHTML = '';
+        queuedEls = [];
         for (const msg of m.messages) {
           add(msg.role === 'user' ? 'user' : 'claude', msg.text);
         }
@@ -695,7 +706,15 @@ function connect() {
     }
     else if (m.type === 'error') { agentBusy = false; hideWorking(); setState('idle'); micBtn.classList.remove('busy'); add('error', m.text); speak('Something went wrong: ' + m.text); }
     else if (m.type === 'result') {
-      agentBusy = false; hideWorking(); setState('idle'); micBtn.classList.remove('busy');
+      if (queuedEls.length > 0) {
+        // A queued message starts the next turn right away: unpin its bubble
+        // (it stays at the bottom, the new turn's messages follow it) and
+        // stay in the busy state.
+        const next = queuedEls.shift();
+        next.classList.remove('queued');
+      } else {
+        agentBusy = false; hideWorking(); setState('idle'); micBtn.classList.remove('busy');
+      }
       // Update cached sessions if provided
       if (m.sessions) {
         cachedSessions = m.sessions;
@@ -708,7 +727,7 @@ function connect() {
       }
       // Only speak result.text if provided; lastReply was already spoken via speakBrief/playServerAudio
       if (m.text) { lastReply = m.text; speak(m.text); }
-      else if (handsFree && !tts.speaking && tts.queue.length === 0) startListening();
+      else if (!agentBusy && handsFree && !tts.speaking && tts.queue.length === 0) startListening();
     }
   };
 }
@@ -723,8 +742,15 @@ function sendUser(text) {
     add('error', 'Please select a session first');
     return;
   }
-  add('user', text);
+  const el = add('user', text);
   ws.send(JSON.stringify({ type: 'user', text }));
+  if (agentBusy) {
+    // Agent is mid-turn: this message is queued, keep it pinned at the bottom
+    el.classList.add('queued');
+    queuedEls.push(el);
+    pinBottomEls();
+    log.scrollTop = log.scrollHeight;
+  }
   agentBusy = true;
   micBtn.classList.add('busy');
   setState('idle');
@@ -1006,6 +1032,8 @@ const tts = {
       this.currentAudio = null;
       if (!agentBusy) setState('idle');
       if (handsFree && !listening && !agentBusy) startListening();
+      // Playback-only listening (barge-in outside hands-free) ends with playback
+      else if (!handsFree && listening && !micHold) stopListening();
       return;
     }
 
@@ -1014,8 +1042,8 @@ const tts = {
     // While busy the in-chat working indicator covers it; only label speaking
     setState(agentBusy ? 'idle' : 'speaking');
 
-    // Start VAD during playback for barge-in detection
-    if (handsFree && !listening) {
+    // Start VAD during playback so barge-in works in any mode
+    if (!listening) {
       startListening();
     }
 
@@ -1167,7 +1195,7 @@ micBtn.addEventListener('pointerdown', (e) => {
   e.preventDefault();
   unlockTTS();
   if (handsFree) { setHandsFree(false); return; } // tap unlocks hands-free
-  micHold = { startY: e.clientY, startT: Date.now(), wasListening: listening };
+  micHold = { startX: e.clientX, startY: e.clientY, startT: Date.now(), wasListening: listening };
   try { micBtn.setPointerCapture(e.pointerId); } catch {}
   lockHint.classList.add('show');
   if (!listening) startListening();
@@ -1175,9 +1203,10 @@ micBtn.addEventListener('pointerdown', (e) => {
 
 micBtn.addEventListener('pointermove', (e) => {
   if (!micHold) return;
-  const dy = micHold.startY - e.clientY;
-  lockHint.classList.toggle('near', dy > LOCK_DIST * 0.5);
-  if (dy > LOCK_DIST) {
+  // Slide toward the lock (left) or up — either engages hands-free
+  const d = Math.max(micHold.startX - e.clientX, micHold.startY - e.clientY);
+  lockHint.classList.toggle('near', d > LOCK_DIST * 0.5);
+  if (d > LOCK_DIST) {
     micHold = null;
     lockHint.classList.remove('show', 'near');
     setHandsFree(true);
@@ -1216,6 +1245,9 @@ textInput.addEventListener('keydown', (e) => {
 navHosts.onclick = () => showPage('hosts');
 navSessions.onclick = () => showPage('sessions');
 navChat.onclick = () => showPage('chat');
+
+// Keep the newest message visible when the viewport shrinks (e.g. keyboard)
+window.addEventListener('resize', () => { log.scrollTop = log.scrollHeight; });
 </script>
 </body>
 </html>
