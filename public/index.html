@@ -768,6 +768,7 @@ function sendUser(text) {
 
 // ---------------- Silero VAD with Whisper ----------------
 let myvad = null;
+let bargeFrames = 0; // consecutive loud speech frames during playback
 let vadReady = false;
 
 // Convert Float32Array at 16kHz to WAV blob
@@ -815,11 +816,33 @@ async function initVAD() {
       minSpeechFrames: 5,             // Fewer frames needed to trigger (default 3)
       submitUserSpeechOnPause: true,  // Push-to-talk: releasing mid-speech still submits
       onSpeechStart: () => {
-        // Don't stop audio yet - wait for onSpeechEnd to confirm it's real speech
-        // Just show a subtle indicator
+        // Duck playback right away so barge-in feels instant; the hard stop
+        // waits for a few confirmed loud frames (onFrameProcessed below).
         console.log('onSpeechStart fired, tts.speaking=' + tts.speaking);
+        if (tts.speaking) tts.duck(true);
         if (!interimEl) interimEl = add('interim', '');
         interimEl.textContent = '… listening...';
+      },
+      // Early barge-in: stop playback after ~4 consecutive frames (~130ms) of
+      // high-probability, loud speech instead of waiting for the utterance to
+      // end. The VAD keeps running so onSpeechEnd still gets the full audio.
+      onFrameProcessed: (probs, frame) => {
+        if (!tts.speaking) { bargeFrames = 0; return; }
+        let e = 0;
+        for (let i = 0; i < frame.length; i++) e += frame[i] * frame[i];
+        e = Math.sqrt(e / frame.length);
+        if (probs.isSpeech > 0.7 && e > 0.03) {
+          if (++bargeFrames >= 4) {
+            bargeFrames = 0;
+            console.log('Early barge-in, frame energy:', e.toFixed(4));
+            if (ws && ws.readyState === 1) {
+              ws.send(JSON.stringify({ type: 'barge_in', energy: e, duringPlayback: true, early: true }));
+            }
+            tts.stop();
+          }
+        } else {
+          bargeFrames = 0;
+        }
       },
       onSpeechEnd: async (audio) => {
         // Check audio energy - reject if too quiet (likely noise/muted mic)
@@ -853,6 +876,7 @@ async function initVAD() {
           if (ws && ws.readyState === 1) {
             ws.send(JSON.stringify({ type: 'vad_rejected', energy: energy, threshold: threshold, duringPlayback: duringPlayback }));
           }
+          tts.duck(false); // false alarm: restore full playback volume
           if (interimEl) { interimEl.remove(); interimEl = null; }
           if (handsFree && !agentBusy) setTimeout(startListening, 200);
           return;
@@ -1012,6 +1036,15 @@ const tts = {
     }
     this.queue.length = 0;
     this.speaking = false;
+    this.ducked = false;
+  },
+
+  // Duck (or restore) playback volume while we suspect the user is talking.
+  // Only server audio has a volume control; native/web speech can't duck.
+  ducked: false,
+  duck(on) {
+    this.ducked = on;
+    if (this.currentAudio) this.currentAudio.volume = on ? 0.15 : 1.0;
   },
 
   // Queue text or audio for speaking
@@ -1068,6 +1101,7 @@ const tts = {
   playServerAudio(item) {
     try {
       this.currentAudio = new Audio('data:audio/wav;base64,' + item.audio);
+      this.currentAudio.volume = this.ducked ? 0.15 : 1.0;
       this.currentAudio.onended = () => {
         console.log('Server audio ended');
         this.currentAudio = null;

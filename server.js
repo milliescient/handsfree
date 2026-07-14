@@ -477,7 +477,7 @@ wss.on('connection', (ws) => {
       console.log(`[VAD REJECTED] energy=${msg.energy.toFixed(4)} threshold=${msg.threshold} playback=${msg.duringPlayback}`);
     } else if (msg.type === 'barge_in') {
       // Log when barge-in is triggered
-      console.log(`[BARGE-IN] energy=${msg.energy.toFixed(4)} playback=${msg.duringPlayback}`);
+      console.log(`[BARGE-IN] energy=${msg.energy.toFixed(4)} playback=${msg.duringPlayback}${msg.early ? ' early' : ''}`);
     } else if (msg.type === 'debug') {
       console.log(`[DEBUG] ${msg.msg}`);
     } else if (msg.type === 'transcribe' && msg.audio) {
