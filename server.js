@@ -413,6 +413,7 @@ wss.on('connection', (ws) => {
       prompt: text,
       options: {
         cwd: WORKDIR,
+        model: 'claude-fable-5',
         ...(sessionId ? { resume: sessionId } : {}),
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
