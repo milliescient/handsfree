@@ -66,6 +66,17 @@ const APP_VERSION = (() => {
     console.log('[WARN] Could not verify APK version:', e.message);
   }
 })();
+
+// Version advertised to clients for update prompts: the version embedded in
+// the APK we actually serve. Comparing against git HEAD instead re-arms the
+// update dialog on every commit made without a rebuild — the app would
+// install the served APK and immediately be "outdated" again.
+const SERVED_APK_VERSION = (() => {
+  try {
+    const html = readFileSync(path.join(__dirname, 'android/app/src/main/assets/public/index.html'), 'utf8');
+    return html.match(/const APP_VERSION = '([^']+)'/)?.[1] ?? APP_VERSION;
+  } catch { return APP_VERSION; }
+})();
 const SESSIONS_FILE = path.join(__dirname, '.sessions.json');
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const USAGE_FILE = path.join(__dirname, '.usage.json');
@@ -337,7 +348,7 @@ const server = createServer(loadOrCreateCert(), async (req, res) => {
     res.end(JSON.stringify(loadSessions()));
   } else if (url.pathname === '/version' && req.method === 'GET') {
     res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ version: APP_VERSION }));
+    res.end(JSON.stringify({ version: SERVED_APK_VERSION }));
   } else if (url.pathname === '/usage' && req.method === 'GET') {
     const usage = loadUsage();
     const minutes = (usage.whisperSeconds / 60).toFixed(2);
@@ -384,7 +395,7 @@ wss.on('connection', (ws) => {
   const pending = []; // utterances queued while a turn is running
   let lastUserMessage = '';
 
-  send({ type: 'hello', workdir: WORKDIR, sessions: loadSessions(), version: APP_VERSION });
+  send({ type: 'hello', workdir: WORKDIR, sessions: loadSessions(), version: SERVED_APK_VERSION });
 
   function toolSummary(block) {
     const input = block.input || {};
