@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build the Android APK using git SHA for version tracking
+# Build the Android APK and restart server to ensure version sync
 
 set -e
 cd "$(dirname "$0")"
@@ -21,7 +21,17 @@ cd android
 
 # Copy APK to public folder
 cp app/build/outputs/apk/debug/app-debug.apk ../public/handsfree.apk
+cd ..
 
 echo ""
 echo "Built handsfree.apk version $GIT_SHA"
+
+# Restart server so it picks up the same git SHA
+echo "Restarting server..."
+pkill -f "node.*server.js" 2>/dev/null || true
+sleep 1
+nohup node server.js >> .server.log 2>&1 &
+sleep 2
+
+echo "Server restarted with version $GIT_SHA"
 echo "APK available at: public/handsfree.apk"

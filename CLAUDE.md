@@ -15,8 +15,9 @@ This script:
 2. Copies index.html to the Android assets
 3. Builds the APK
 4. Copies it to public/handsfree.apk
+5. Restarts the server so it reports the same git SHA
 
-The server also reads the git SHA at startup. When the app connects, if its embedded SHA differs from the server's current SHA, it prompts the user to update.
+This ensures the APK and server are always in sync. When the app connects, if its embedded SHA differs from the server's current SHA, it prompts the user to update.
 
 **Important:** Commit your changes before running the build script. The APK embeds the current git SHA, so if you build before committing, the APK will have the old SHA and won't trigger updates.
 
