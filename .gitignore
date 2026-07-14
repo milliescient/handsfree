@@ -1,7 +1,7 @@
 node_modules/
 certs/
 .env
-.server.log
+.server.log*
 .sessions.json
 .session
 .usage.json
