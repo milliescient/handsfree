@@ -138,6 +138,31 @@ function emitQueue() {
   emit({ type: 'queue', queue: queueSnapshot() });
 }
 
+// Two clients can hear the same utterance and submit slightly different
+// transcriptions ("cute" vs "cued"), which slips past the server's exact-match
+// dedup. Catch near-duplicates here by word overlap within a short window.
+const recentJobs = []; // { words: Set, at: ms }
+function jobWords(text) {
+  return new Set(
+    text.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean)
+  );
+}
+function isNearDuplicate(text) {
+  const words = jobWords(text);
+  if (!words.size) return false;
+  const now = Date.now();
+  for (const r of recentJobs) {
+    if (now - r.at > 20000) continue;
+    let inter = 0;
+    for (const w of words) if (r.words.has(w)) inter++;
+    const jaccard = inter / (words.size + r.words.size - inter);
+    if (jaccard > 0.8) return true;
+  }
+  recentJobs.push({ words, at: now });
+  while (recentJobs.length > 10) recentJobs.shift();
+  return false;
+}
+
 process.on('SIGHUP', () => {
   console.log(`[drain] SIGHUP at ${new Date().toISOString()} — will restart when idle (active=${!!active}, queued=${queue.length})`);
   draining = true;
@@ -234,6 +259,10 @@ wss.on('connection', (ws) => {
         // Still accept it — it runs after the restart? No: we exit when idle.
         // Run it now; drain waits for the whole queue to empty.
         console.log('[drain] accepting message during drain; restart happens after the queue empties');
+      }
+      if (isNearDuplicate(msg.text.trim())) {
+        console.log(`Dropping near-duplicate transcription: "${msg.text.trim().slice(0, 60)}"`);
+        return;
       }
       const job = { text: msg.text.trim(), sessionId: msg.sessionId || null, connId: msg.connId };
       if (active) {
