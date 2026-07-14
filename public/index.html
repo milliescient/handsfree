@@ -650,7 +650,7 @@ function connect() {
       }
       // Only speak result.text if provided; lastReply was already spoken via speakBrief/playServerAudio
       if (m.text) { lastReply = m.text; speak(m.text); }
-      else if (handsFree && !ttsSpeaking && !audioPlaying && ttsQueue.length === 0 && audioQueue.length === 0) startListening();
+      else if (handsFree && !tts.speaking && tts.queue.length === 0) startListening();
     }
   };
 }
@@ -722,7 +722,7 @@ async function initVAD() {
       onSpeechStart: () => {
         // Don't stop audio yet - wait for onSpeechEnd to confirm it's real speech
         // Just show a subtle indicator
-        console.log('onSpeechStart fired, audioPlaying=' + audioPlaying);
+        console.log('onSpeechStart fired, tts.speaking=' + tts.speaking);
         if (!interimEl) interimEl = add('interim', '');
         interimEl.textContent = '… listening...';
       },
@@ -735,7 +735,7 @@ async function initVAD() {
           if (Math.abs(audio[i]) > maxSample) maxSample = Math.abs(audio[i]);
         }
         energy = Math.sqrt(energy / audio.length);
-        const duringPlayback = audioPlaying || audioQueue.length > 0;
+        const duringPlayback = tts.speaking || tts.queue.length > 0;
         console.log('VAD trigger - energy:', energy.toFixed(4), 'max:', maxSample.toFixed(4), 'samples:', audio.length, 'during_playback:', duringPlayback);
 
         // Send debug info to server for logging
@@ -768,16 +768,7 @@ async function initVAD() {
         if (ws && ws.readyState === 1) {
           ws.send(JSON.stringify({ type: 'barge_in', energy: energy, duringPlayback: duringPlayback }));
         }
-        stopServerAudio();
-        if (ttsSpeaking || ttsQueue.length > 0) {
-          if (hasNativeTTS()) {
-            window.AudioBridge.stopSpeaking();
-          } else if ('speechSynthesis' in window) {
-            speechSynthesis.cancel();
-          }
-          ttsQueue.length = 0;
-          ttsSpeaking = false;
-        }
+        tts.stop();  // Stop all TTS (server audio, native, web speech)
 
         // Pause VAD while transcribing - will restart during playback for barge-in
         if (myvad) myvad.pause();
@@ -870,241 +861,233 @@ function stopListening() {
 }
 
 // ---------------- Text to speech ----------------
-// Queue for server-generated audio
-let audioQueue = [];
-let audioPlaying = false;
-let currentAudio = null;
+// Unified TTS system with three backends:
+// 1. Server audio (Piper WAV) - highest quality, requires server
+// 2. Native Android TTS - good quality, works offline in app
+// 3. Web Speech API - fallback for browsers
 
-// Play audio received from server (base64 WAV)
-function playServerAudio(base64Audio, text) {
-  console.log('playServerAudio queuing:', text.slice(0, 50), 'queueLen:', audioQueue.length, 'playing:', audioPlaying);
-  audioQueue.push({ audio: base64Audio, text });
-  if (!audioPlaying) {
-    playNextAudio();
-  }
-}
+const tts = {
+  queue: [],
+  speaking: false,
+  currentAudio: null,
+  unlocked: false,
+  lastQueued: '',
+  spokenSentences: new Set(),
 
-function playNextAudio() {
-  if (audioQueue.length === 0) {
-    audioPlaying = false;
-    currentAudio = null;
-    if (!agentBusy) setState('idle');
-    if (handsFree && !listening && !agentBusy) startListening();
-    return;
-  }
+  // Check which TTS backend is available
+  hasNative() {
+    return !!(window.AudioBridge && typeof window.AudioBridge.speak === 'function');
+  },
+  hasWebSpeech() {
+    return 'speechSynthesis' in window;
+  },
+  hasAny() {
+    return this.hasNative() || this.hasWebSpeech();
+  },
 
-  audioPlaying = true;
-  const item = audioQueue.shift();
-  setState(agentBusy ? 'working' : 'speaking');
-
-  // Start VAD during playback for barge-in detection
-  console.log('playNextAudio: handsFree=' + handsFree + ' listening=' + listening);
-  if (ws && ws.readyState === 1) {
-    ws.send(JSON.stringify({ type: 'debug', msg: 'playNextAudio handsFree=' + handsFree + ' listening=' + listening }));
-  }
-  if (handsFree && !listening) {
-    console.log('Starting VAD for barge-in detection');
-    if (ws && ws.readyState === 1) {
-      ws.send(JSON.stringify({ type: 'debug', msg: 'Starting VAD for barge-in' }));
+  // Unlock TTS (required for browsers)
+  unlock() {
+    if (this.unlocked) return;
+    this.unlocked = true;
+    if (!this.hasNative() && this.hasWebSpeech()) {
+      const u = new SpeechSynthesisUtterance(' ');
+      u.volume = 0;
+      speechSynthesis.speak(u);
+      setTimeout(() => {
+        if (speechSynthesis.getVoices().length === 0)
+          add('error', 'No text-to-speech voices in this browser, so replies will be silent.');
+      }, 3000);
     }
-    startListening();
+  },
+
+  // Stop all TTS playback
+  stop() {
+    // Stop server audio
+    if (this.currentAudio) {
+      this.currentAudio.pause();
+      this.currentAudio = null;
+    }
+    // Stop native TTS
+    if (this.hasNative()) {
+      window.AudioBridge.stopSpeaking();
+    }
+    // Stop Web Speech
+    if (this.hasWebSpeech()) {
+      speechSynthesis.cancel();
+    }
+    this.queue.length = 0;
+    this.speaking = false;
+  },
+
+  // Queue text or audio for speaking
+  enqueue(item) {
+    // item can be { text, audio } for server audio or { text } for TTS
+    if (!item.text && !item.audio) return;
+
+    // Skip duplicates
+    const key = item.audio ? 'audio:' + item.text : item.text;
+    if (key === this.lastQueued) {
+      console.log('TTS skipping duplicate:', item.text?.slice(0, 50));
+      return;
+    }
+    this.lastQueued = key;
+
+    console.log('TTS enqueue:', item.text?.slice(0, 50), 'hasAudio:', !!item.audio);
+    this.queue.push(item);
+    if (!this.speaking) {
+      this.playNext();
+    }
+  },
+
+  // Play next item in queue
+  playNext() {
+    if (this.queue.length === 0) {
+      this.speaking = false;
+      this.currentAudio = null;
+      if (!agentBusy) setState('idle');
+      if (handsFree && !listening && !agentBusy) startListening();
+      return;
+    }
+
+    this.speaking = true;
+    const item = this.queue.shift();
+    setState(agentBusy ? 'working' : 'speaking');
+
+    // Start VAD during playback for barge-in detection
+    if (handsFree && !listening) {
+      startListening();
+    }
+
+    // If we have server audio, play it
+    if (item.audio) {
+      this.playServerAudio(item);
+    } else {
+      this.speakText(item.text);
+    }
+  },
+
+  // Play server-generated audio (WAV)
+  playServerAudio(item) {
+    try {
+      this.currentAudio = new Audio('data:audio/wav;base64,' + item.audio);
+      this.currentAudio.onended = () => {
+        console.log('Server audio ended');
+        this.currentAudio = null;
+        this.playNext();
+      };
+      this.currentAudio.onerror = (e) => {
+        console.error('Server audio error:', e);
+        this.currentAudio = null;
+        // Fall back to TTS
+        this.speakText(item.text);
+      };
+      this.currentAudio.play().catch(e => {
+        console.error('Server audio play failed:', e);
+        this.currentAudio = null;
+        this.speakText(item.text);
+      });
+    } catch (e) {
+      console.error('Server audio creation failed:', e);
+      this.currentAudio = null;
+      this.speakText(item.text);
+    }
+  },
+
+  // Speak text using native or web TTS
+  speakText(text) {
+    if (!text) {
+      this.playNext();
+      return;
+    }
+
+    if (this.hasNative()) {
+      console.log('TTS native:', text.slice(0, 50));
+      window.AudioBridge.speak(text);
+      // Native TTS calls window.onNativeTTSDone when finished
+    } else if (this.hasWebSpeech()) {
+      console.log('TTS web:', text.slice(0, 50));
+      const u = new SpeechSynthesisUtterance(text);
+      u.rate = 1.05;
+      // Chrome workaround for long utterances
+      const keepAlive = setInterval(() => {
+        if (speechSynthesis.speaking) speechSynthesis.resume();
+        else clearInterval(keepAlive);
+      }, 5000);
+      u.onend = () => { clearInterval(keepAlive); this.playNext(); };
+      u.onerror = () => { clearInterval(keepAlive); this.playNext(); };
+      speechSynthesis.speak(u);
+    } else {
+      // No TTS available
+      this.playNext();
+    }
+  },
+
+  // Clean text for TTS
+  speakable(text) {
+    return text
+      .replace(/```[\s\S]*?```/g, ' (code omitted) ')
+      .replace(/`([^`]+)`/g, '$1')
+      .replace(/https?:\/\/\S+/g, ' (link) ')
+      .replace(/[*_#>|]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  },
+
+  // Speak first sentence only (for progress updates)
+  speakBrief(text) {
+    const clean = this.speakable(text);
+    if (!clean) return;
+    const firstSentence = clean.split(/(?<=[.!?])\s+/)[0].slice(0, 180);
+    this.spokenSentences.add(firstSentence);
+    this.enqueue({ text: firstSentence });
+  },
+
+  // Speak full text, skipping already-spoken sentences
+  speakFull(text) {
+    const clean = this.speakable(text).slice(0, 2000);
+    const sentences = clean.split(/(?<=[.!?])\s+/);
+    const newSentences = sentences.filter(s => !this.spokenSentences.has(s));
+    if (newSentences.length > 0) {
+      this.enqueue({ text: newSentences.join(' ') });
+    }
+    this.spokenSentences.clear();
+  },
+
+  // Called from native Android when TTS finishes
+  onNativeDone() {
+    this.playNext();
   }
-
-  try {
-    currentAudio = new Audio('data:audio/wav;base64,' + item.audio);
-    currentAudio.onended = () => {
-      console.log('Audio playback ended');
-      currentAudio = null;
-      playNextAudio();
-    };
-    currentAudio.onerror = (e) => {
-      console.error('Audio playback error:', e);
-      currentAudio = null;
-      // Fall back to browser TTS if audio fails
-      speakBrief(item.text);
-      playNextAudio();
-    };
-    currentAudio.play().catch(e => {
-      console.error('Audio play failed:', e);
-      currentAudio = null;
-      speakBrief(item.text);
-      playNextAudio();
-    });
-  } catch (e) {
-    console.error('Audio creation failed:', e);
-    currentAudio = null;
-    speakBrief(item.text);
-    playNextAudio();
-  }
-}
-
-// Stop server audio playback (for barge-in)
-function stopServerAudio() {
-  if (currentAudio) {
-    currentAudio.pause();
-    currentAudio = null;
-  }
-  audioQueue.length = 0;
-  audioPlaying = false;
-}
-
-function speakable(text) {
-  return text
-    .replace(/```[\s\S]*?```/g, ' (code omitted) ')
-    .replace(/`([^`]+)`/g, '$1')
-    .replace(/https?:\/\/\S+/g, ' (link) ')
-    .replace(/[*_#>|]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-let ttsUnlocked = false;
-let lastReply = '';
-
-// Check if native Android TTS is available (check dynamically since bridge may load late)
-function hasNativeTTS() {
-  const has = !!(window.AudioBridge && typeof window.AudioBridge.speak === 'function');
-  console.log('hasNativeTTS check:', has, 'AudioBridge:', !!window.AudioBridge);
-  return has;
-}
-
-// Browsers refuse to play audio that wasn't initiated by a user gesture.
-// Speaking a silent utterance inside the first tap unlocks TTS for the
-// replies that arrive later over the WebSocket.
-function unlockTTS() {
-  if (ttsUnlocked) return;
-  ttsUnlocked = true;
-  if (!hasNativeTTS() && 'speechSynthesis' in window) {
-    const u = new SpeechSynthesisUtterance(' ');
-    u.volume = 0;
-    speechSynthesis.speak(u);
-    setTimeout(() => {
-      if (speechSynthesis.getVoices().length === 0)
-        add('error', 'No text-to-speech voices in this browser, so replies will be silent. Linux: install speech-dispatcher + espeak-ng (or use Chrome). iPhone: check the mute switch.');
-    }, 3000);
-  }
-}
-
-let speakTimeout = null;
-let ttsQueue = [];
-let ttsSpeaking = false;
-
-// Called from native Android when TTS finishes
-window.onNativeTTSDone = function() {
-  ttsSpeaking = false;
-  speakNext();
 };
 
-function speakNext() {
-  if (ttsQueue.length === 0) {
-    ttsSpeaking = false;
-    if (!agentBusy) setState('idle');
-    if (handsFree && !listening && !agentBusy) startListening();
-    return;
-  }
-  ttsSpeaking = true;
-  const clean = ttsQueue.shift();
-  setState(agentBusy ? 'working' : 'speaking');
-  // Start VAD during TTS for barge-in detection
-  if (ws && ws.readyState === 1) {
-    ws.send(JSON.stringify({ type: 'debug', msg: 'speakNext: handsFree=' + handsFree + ' listening=' + listening }));
-  }
-  if (handsFree && !listening) {
-    if (ws && ws.readyState === 1) {
-      ws.send(JSON.stringify({ type: 'debug', msg: 'Starting VAD for TTS barge-in' }));
-    }
-    startListening();
-  }
+// Bridge for native Android callback
+window.onNativeTTSDone = () => tts.onNativeDone();
 
-  if (hasNativeTTS()) {
-    // Use native Android TTS
-    console.log('Speaking via native TTS:', clean.slice(0, 50));
-    window.AudioBridge.speak(clean);
-  } else if ('speechSynthesis' in window) {
-    // Fall back to Web Speech API
-    const u = new SpeechSynthesisUtterance(clean);
-    u.rate = 1.05;
-    // Desktop Chrome silently stalls long utterances after ~15s unless nudged.
-    const keepAlive = setInterval(() => {
-      if (speechSynthesis.speaking) speechSynthesis.resume();
-      else clearInterval(keepAlive);
-    }, 5000);
-    u.onend = () => { clearInterval(keepAlive); speakNext(); };
-    u.onerror = () => { clearInterval(keepAlive); speakNext(); };
-    speechSynthesis.speak(u);
-  } else {
-    // No TTS available, skip to next
-    speakNext();
-  }
+
+// Play audio received from server (base64 WAV) - uses unified TTS
+function playServerAudio(base64Audio, text) {
+  tts.enqueue({ audio: base64Audio, text });
 }
 
-let lastQueued = '';
-function speakRaw(clean) {
-  if (!clean) {
-    if (handsFree && !agentBusy) startListening();
-    return;
-  }
-  // If server audio is playing or queued, don't use browser/native TTS
-  if (audioPlaying || audioQueue.length > 0) {
-    console.log('speakRaw SKIPPED - server audio active');
-    return;
-  }
-  if (!hasNativeTTS() && !('speechSynthesis' in window)) {
-    if (handsFree && !agentBusy) startListening();
-    return;
-  }
-  // Skip if this is the same text we just queued (prevents duplicates)
-  if (clean === lastQueued) {
-    console.log('speakRaw SKIPPED duplicate:', clean.slice(0, 50));
-    return;
-  }
-  console.log('speakRaw QUEUING:', clean.slice(0, 50), 'queue length:', ttsQueue.length);
-  lastQueued = clean;
-  ttsQueue.push(clean);
-  if (!ttsSpeaking) {
-    speakNext();
-  }
+// Stop all TTS playback (for barge-in)
+function stopServerAudio() {
+  tts.stop();
 }
 
-// Track sentences we've already spoken so we don't repeat them
-let spokenSentences = new Set();
+// Legacy aliases for compatibility
+function speakable(text) { return tts.speakable(text); }
+function hasNativeTTS() { return tts.hasNative(); }
+function unlockTTS() { tts.unlock(); }
 
-// Full reply, spoken at end of turn.
-function speak(text) {
-  const clean = speakable(text).slice(0, 2000);
-  // Split into sentences and only speak ones we haven't said yet
-  const sentences = clean.split(/(?<=[.!?])\s+/);
-  const newSentences = sentences.filter(s => !spokenSentences.has(s));
-  if (newSentences.length > 0) {
-    const toSpeak = newSentences.join(' ');
-    console.log('speak() queuing new sentences:', toSpeak.slice(0, 50));
-    speakRaw(toSpeak);
-  }
-  // Clear for next turn
-  spokenSentences.clear();
-}
-
-// Progress narration while the agent works: first sentence, kept short.
-function speakBrief(text) {
-  const clean = speakable(text);
-  if (!clean) return;
-  const firstSentence = clean.split(/(?<=[.!?])\s+/)[0].slice(0, 180);
-  spokenSentences.add(firstSentence);
-  speakRaw(firstSentence);
-}
+let lastReply = '';
+// Legacy wrappers - all TTS now goes through unified tts object
+function speak(text) { tts.speakFull(text); }
+function speakBrief(text) { tts.speakBrief(text); }
 
 // ---------------- Controls ----------------
 micBtn.onclick = () => { unlockTTS(); listening ? stopListening() : startListening(); };
 
 stopBtn.onclick = () => {
-  stopServerAudio();
-  if (hasNativeTTS()) {
-    window.AudioBridge.stopSpeaking();
-  } else if ('speechSynthesis' in window) {
-    speechSynthesis.cancel();
-  }
-  ttsQueue.length = 0;
-  ttsSpeaking = false;
+  tts.stop();
   stopListening();
   if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'interrupt' }));
   agentBusy = false;
