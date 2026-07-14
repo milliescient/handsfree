@@ -242,6 +242,18 @@ function exitForRestart() {
 }
 
 async function runTurn(job) {
+  // Never spawn a turn without real text — Claude Code exits nonzero on an
+  // empty prompt, which surfaces as a crash. Skip the job and keep the queue
+  // moving instead.
+  if (!job || typeof job.text !== 'string' || !job.text.trim()) {
+    console.warn(`Skipping job with empty text (connId=${job && job.connId})`);
+    if (queue.length) {
+      const next = queue.shift();
+      emitQueue();
+      runTurn(next);
+    } else if (draining) exitForRestart();
+    return;
+  }
   let lastAssistantText = '';
   let sessionId = job.sessionId || null;
   const requested = sessionId;
@@ -252,6 +264,9 @@ async function runTurn(job) {
   console.log(`runTurn: connId=${job.connId} resume=${requested || 'new session'} cwd=${cwd} text="${job.text.slice(0, 60)}"`);
   activeJob = job;
   activeSessionId = sessionId;
+  // Keep a short tail of the Claude Code subprocess's stderr so a crash
+  // ("process exited with code 1") leaves its reason in our log.
+  const stderrTail = [];
   active = query({
     prompt: job.text,
     options: {
@@ -261,6 +276,12 @@ async function runTurn(job) {
       permissionMode: 'bypassPermissions',
       allowDangerouslySkipPermissions: true,
       systemPrompt: { type: 'preset', preset: 'claude_code', append: VOICE_SYSTEM_PROMPT },
+      stderr: (data) => {
+        const line = String(data).trimEnd();
+        if (!line) return;
+        stderrTail.push(line);
+        while (stderrTail.length > 40) stderrTail.shift();
+      },
     },
   });
   try {
@@ -300,6 +321,9 @@ async function runTurn(job) {
     }
   } catch (err) {
     console.error('Turn error:', err);
+    if (stderrTail.length) {
+      console.error('[claude stderr tail]\n' + stderrTail.join('\n'));
+    }
     emit({ type: 'error', text: String(err.message || err), connId: job.connId });
   } finally {
     active = null;
