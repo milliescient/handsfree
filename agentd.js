@@ -7,7 +7,7 @@
 // exit 0 so the supervisor restarts us with new code). SIGTERM/SIGINT = die
 // now, losing the in-flight turn.
 
-import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync, renameSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync, copyFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -35,8 +35,14 @@ const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
 try {
   mkdirSync(DATA_DIR, { recursive: true });
   const legacy = path.join(__dirname, '.sessions.json');
-  if (!existsSync(SESSIONS_FILE) && existsSync(legacy)) renameSync(legacy, SESSIONS_FILE);
-} catch {}
+  if (!existsSync(SESSIONS_FILE) && existsSync(legacy)) {
+    copyFileSync(legacy, SESSIONS_FILE); // rename fails across filesystems
+    unlinkSync(legacy);
+  }
+  // A pre-migration agentd finishing its last turn during the rollout can
+  // recreate the legacy file; it only holds that turn's preview update.
+  else if (existsSync(legacy)) unlinkSync(legacy);
+} catch (err) { console.error('Sessions migration failed:', err.message); }
 const PID_FILE = path.join(__dirname, '.agentd.pid');
 
 writeFileSync(PID_FILE, String(process.pid) + '\n');
@@ -149,8 +155,33 @@ function queueSnapshot() {
   return queue.map((j) => ({ text: j.text, sessionId: j.sessionId }));
 }
 function emitQueue() {
+  persistQueue();
   emit({ type: 'queue', queue: queueSnapshot() });
 }
+
+// Queued jobs survive hard restarts (a crash, the service takeover): every
+// queue change is mirrored to disk and reloaded on startup. Only jobs that
+// haven't started are persisted — replaying a half-finished turn would redo
+// its work, and a job that crashes agentd would crash-loop it.
+const QUEUE_FILE = path.join(DATA_DIR, 'queue.json');
+function persistQueue() {
+  try {
+    if (queue.length) writeFileSync(QUEUE_FILE, JSON.stringify(queue, null, 2));
+    else if (existsSync(QUEUE_FILE)) unlinkSync(QUEUE_FILE);
+  } catch (err) { console.error('Could not persist queue:', err.message); }
+}
+try {
+  if (existsSync(QUEUE_FILE)) {
+    for (const j of JSON.parse(readFileSync(QUEUE_FILE, 'utf8'))) {
+      if (j && typeof j.text === 'string' && j.text.trim()) {
+        // connIds are stale after a restart (and could collide with a new
+        // connection's id), so restored jobs carry none.
+        queue.push({ text: j.text, sessionId: j.sessionId || null, cwd: j.cwd || null, connId: null });
+      }
+    }
+    if (queue.length) console.log(`Restored ${queue.length} queued job(s) from a previous run`);
+  }
+} catch (err) { console.error('Could not restore queued jobs:', err.message); }
 
 // Two clients can hear the same utterance and submit slightly different
 // transcriptions ("cute" vs "cued"), which slips past the server's exact-match
@@ -372,3 +403,10 @@ wss.on('connection', (ws) => {
 console.log(`agentd — Claude turn runner`);
 console.log(`Default working directory for new sessions: ${WORKDIR}`);
 console.log(`Listening on ws://127.0.0.1:${PORT} (pid ${process.pid})`);
+
+// Resume jobs restored from the persisted queue of a previous run.
+if (queue.length) {
+  const next = queue.shift();
+  emitQueue();
+  runTurn(next);
+}

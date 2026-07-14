@@ -3,7 +3,7 @@
 // messages to the Claude Agent SDK over WebSocket.
 
 import { createServer } from 'node:https';
-import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync, unlinkSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { networkInterfaces, homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
@@ -91,8 +91,11 @@ const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
 try {
   mkdirSync(DATA_DIR, { recursive: true });
   const legacy = path.join(__dirname, '.sessions.json');
-  if (!existsSync(SESSIONS_FILE) && existsSync(legacy)) renameSync(legacy, SESSIONS_FILE);
-} catch {}
+  if (!existsSync(SESSIONS_FILE) && existsSync(legacy)) {
+    copyFileSync(legacy, SESSIONS_FILE); // rename fails across filesystems
+    unlinkSync(legacy);
+  }
+} catch (err) { console.error('Sessions migration failed:', err.message); }
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const USAGE_FILE = path.join(__dirname, '.usage.json');
 // Local Whisper server (faster-whisper on GPU) - falls back to OpenAI if unavailable
