@@ -1001,9 +1001,13 @@ async function doInitVAD() {
     }
 
     myvad = await withTimeout(vad.MicVAD.new({
-      positiveSpeechThreshold: 0.7,   // Lower = more sensitive (default 0.5)
+      positiveSpeechThreshold: 0.7,   // High = fewer false triggers from TTS bleed
       negativeSpeechThreshold: 0.35,  // Default value
       minSpeechFrames: 5,             // Fewer frames needed to trigger (default 3)
+      // The high trigger threshold means capture starts after the first
+      // syllables; include ~0.5s of audio from before the trigger so
+      // utterance onsets aren't clipped ("queuing" arrived as "to you").
+      preSpeechPadFrames: 5,
       submitUserSpeechOnPause: true,  // Push-to-talk: releasing mid-speech still submits
       onSpeechStart: () => {
         // Duck playback right away so barge-in feels instant; the hard stop
