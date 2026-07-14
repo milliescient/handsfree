@@ -23,5 +23,5 @@ cd android
 cp app/build/outputs/apk/debug/app-debug.apk ../public/handsfree.apk
 
 echo ""
-echo "Built handsfree.apk version $NEW_VERSION"
+echo "Built handsfree.apk version $GIT_SHA"
 echo "APK available at: public/handsfree.apk"
