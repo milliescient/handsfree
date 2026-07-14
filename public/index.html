@@ -179,7 +179,11 @@ let sessionChosen = false;
 let currentSessionId = localStorage.getItem('handsfree_session') || null; // Persist across reloads
 let currentCwd = null; // Working directory of the chosen session
 let defaultWorkdir = ''; // Server default for new sessions (from hello)
+let serverHostname = ''; // Server machine name (from hello), shown before the workdir
 let cachedSessions = []; // Store sessions from server
+function fmtWorkdir(dir) {
+  return serverHostname ? serverHostname + ':' + dir : dir;
+}
 const sessionPicker = document.getElementById('sessionPicker');
 const sessionList = document.getElementById('sessionList');
 const hostPicker = document.getElementById('hostPicker');
@@ -516,7 +520,7 @@ function selectSession(id, cwd) {
   // Resumed sessions keep the directory they were started in; new sessions
   // use the one just chosen (falling back to the server default).
   currentCwd = id ? (cachedSessions.find(s => s.id === id)?.cwd || null) : (cwd || null);
-  workdirEl.textContent = currentCwd || defaultWorkdir;
+  workdirEl.textContent = fmtWorkdir(currentCwd || defaultWorkdir);
   // Persist to localStorage so we can resume after navigating away
   if (id) {
     localStorage.setItem('handsfree_session', id);
@@ -731,7 +735,8 @@ function connect() {
     const m = JSON.parse(ev.data);
     if (m.type === 'hello') {
       defaultWorkdir = m.workdir;
-      workdirEl.textContent = currentCwd || m.workdir;
+      serverHostname = m.hostname || '';
+      workdirEl.textContent = fmtWorkdir(currentCwd || m.workdir);
       // A turn may still be running in agentd from before we (re)connected —
       // set busy so progress updates are rendered and spoken. And if the
       // agent is idle, drop any stale busy state left over from a message

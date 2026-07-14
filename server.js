@@ -5,7 +5,7 @@
 import { createServer } from 'node:https';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync, unlinkSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { networkInterfaces, homedir } from 'node:os';
+import { networkInterfaces, homedir, hostname } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -529,7 +529,7 @@ wss.on('connection', (ws, req) => {
   });
 
   // busy lets a phone that reconnects mid-turn know work is still in flight
-  send({ type: 'hello', workdir: WORKDIR, sessions: loadSessions(), version: SERVED_APK_VERSION, busy: agentBusy });
+  send({ type: 'hello', workdir: WORKDIR, hostname: hostname(), sessions: loadSessions(), version: SERVED_APK_VERSION, busy: agentBusy });
 
   ws.on('message', async (data) => {
     let msg;
