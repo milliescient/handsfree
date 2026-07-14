@@ -345,6 +345,8 @@ const agentOutbox = []; // messages queued while agentd is down/restarting
 let agentBusy = false;  // best-effort: a turn is in flight
 const conns = new Map(); // connId -> per-phone-connection state
 let nextConnId = 1;
+let lastUserKey = null; // dedup identical user messages from parallel clients
+let lastUserAt = 0;
 
 function sendToAgent(obj) {
   const s = JSON.stringify(obj);
@@ -464,11 +466,21 @@ wss.on('connection', (ws) => {
         send({ type: 'error', text: 'Please select a session first' });
         return;
       }
+      // Deduplicate: with several clients connected (phone + browser tab),
+      // each one hears the user and submits the same transcription.
+      const text = msg.text.trim();
+      const dedupKey = `${conn.sessionId}\n${text}`;
+      if (dedupKey === lastUserKey && Date.now() - lastUserAt < 10000) {
+        console.log('Dropping duplicate user message (multiple clients):', text.slice(0, 50));
+        return;
+      }
+      lastUserKey = dedupKey;
+      lastUserAt = Date.now();
       agentBusy = true;
       if (!agentWs || agentWs.readyState !== WebSocket.OPEN) {
         send({ type: 'status', text: 'agent is restarting — your message is queued' });
       }
-      sendToAgent({ type: 'user', text: msg.text.trim(), sessionId: conn.sessionId, connId });
+      sendToAgent({ type: 'user', text, sessionId: conn.sessionId, connId });
     } else if (msg.type === 'vad_debug') {
       // Log VAD debug info for analyzing false triggers
       console.log(`[VAD] energy=${msg.energy.toFixed(4)} max=${msg.maxSample.toFixed(4)} samples=${msg.samples} playback=${msg.duringPlayback}`);

@@ -1084,8 +1084,11 @@ const tts = {
     // While busy the in-chat working indicator covers it; only label speaking
     setState(agentBusy ? 'idle' : 'speaking');
 
-    // Start VAD during playback so barge-in works in any mode
-    if (!listening) {
+    // Start VAD during playback so barge-in works in any mode — but hidden
+    // pages (e.g. a background browser tab) keep their mic off, or every
+    // open client would transcribe and submit the same speech. Hands-free
+    // is exempt: the phone runs it from the background via the service.
+    if (!listening && (handsFree || !document.hidden)) {
       startListening();
     }
 
