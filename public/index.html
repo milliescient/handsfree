@@ -491,6 +491,12 @@ function scrollLog() {
 // User messages sent while the agent is busy are queued; keep their bubbles
 // pinned at the very bottom of the chat (below the working indicator).
 let queuedEls = [];
+function makeQueuedNote() {
+  const note = document.createElement('div');
+  note.className = 'queued-note';
+  note.textContent = 'queued — still working on the last request';
+  return note;
+}
 function pinBottomEls() {
   if (workingEl && workingEl.parentNode === log) log.appendChild(workingEl);
   for (const el of queuedEls) log.appendChild(el);
@@ -692,10 +698,7 @@ function connect() {
         for (const q of queued) {
           const el = add('user', q);
           el.classList.add('queued');
-          const note = document.createElement('div');
-          note.className = 'queued-note';
-          note.textContent = 'queued — still working on the last request';
-          el.appendChild(note);
+          el.appendChild(makeQueuedNote());
           queuedEls.push(el);
         }
         if (queued.length > 0) { agentBusy = true; micBtn.classList.add('busy'); }
@@ -710,7 +713,7 @@ function connect() {
     }
     else if (m.type === 'tool') add('tool', '⚙ ' + m.text);
     else if (m.type === 'status') {
-      // The queued note is shown attached to the queued bubble instead.
+      // The dimmed pinned bubble already signals queueing; drop the status.
       if (!m.text.startsWith('queued')) add('status', m.text);
     }
     else if (m.type === 'assistant') {
@@ -775,10 +778,7 @@ function sendUser(text) {
     // Agent is mid-turn: this message is queued, keep it pinned at the bottom
     // with the note attached to the bubble so it can't scroll away from it.
     el.classList.add('queued');
-    const note = document.createElement('div');
-    note.className = 'queued-note';
-    note.textContent = 'queued — still working on the last request';
-    el.appendChild(note);
+    el.appendChild(makeQueuedNote());
     queuedEls.push(el);
     pinBottomEls();
     scrollLog();
@@ -1300,7 +1300,15 @@ stopBtn.onclick = () => {
   if (handsFree) setHandsFree(false);
   stopListening();
   if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'interrupt' }));
+  // Interrupt also discards queued messages agent-side; reflect that here so
+  // stale "queued" bubbles don't linger claiming they're still waiting.
+  for (const el of queuedEls) {
+    el.classList.remove('queued');
+    el.querySelector('.queued-note')?.remove();
+  }
+  queuedEls = [];
   agentBusy = false;
+  hideWorking();
   micBtn.classList.remove('busy');
   setState('idle');
 };

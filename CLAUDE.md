@@ -17,6 +17,16 @@ The restart at the end kills the server your session runs inside, ending
 your turn. Speak your summary FIRST, then run ./deploy.sh as the final
 action. If your turn dies there, the deploy still completed.
 
+## Batch queued requests into ONE deploy
+
+Every deploy makes the user manually update the app on their phone, which is
+annoying. If user messages are queued behind the current turn (agentd logs
+show the queue; the queued bubbles do too), do NOT deploy after each one.
+Make the code changes for as many queued requests as possible, deploying
+only when a queued task actually requires the new build to proceed (e.g.
+testing behavior that needs the new APK), or once the queue is drained.
+Commits can happen along the way; the rebuild+restart is the expensive part.
+
 ## APK Build Process
 
 The Android APK bundles a copy of `public/index.html` inside the app at build time. Changes to the HTML require rebuilding the APK.

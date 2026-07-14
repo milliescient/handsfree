@@ -458,6 +458,9 @@ wss.on('connection', (ws) => {
     try { msg = JSON.parse(data); } catch { return; }
 
     if (msg.type === 'interrupt') {
+      // agentd drops its whole queue on interrupt — keep the mirror in sync
+      // so reloading clients don't resurrect cancelled queued bubbles.
+      if (pendingQueue.length) { pendingQueue = []; savePendingQueue(); }
       sendToAgent({ type: 'interrupt' });
     } else if (msg.type === 'session') {
       // Client wants to resume a specific session or start fresh (null)
