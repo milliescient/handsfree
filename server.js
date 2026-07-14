@@ -355,16 +355,11 @@ let nextConnId = 1;
 let lastUserKey = null; // dedup identical user messages from parallel clients
 let lastUserAt = 0;
 
-// Mirror of agentd's job queue (texts only), so a client that reloads mid-turn
-// can still render its queued-but-not-started messages. Persisted to disk
-// because this server restarts on every deploy while agentd keeps draining.
-const QUEUE_FILE = path.join(__dirname, '.queue.json');
-let pendingQueue = (() => {
-  try { return JSON.parse(readFileSync(QUEUE_FILE, 'utf8')); } catch { return []; }
-})();
-function savePendingQueue() {
-  try { writeFileSync(QUEUE_FILE, JSON.stringify(pendingQueue)); } catch {}
-}
+// Mirror of agentd's job queue so a client that reloads mid-turn can still
+// render its queued-but-not-started messages. Fed entirely by agentd (ready
+// and queue events) — guessing at it here drifted out of sync and showed
+// messages both in history and as stale queued bubbles.
+let pendingQueue = []; // [{ text, sessionId }]
 
 function sendToAgent(obj) {
   const s = JSON.stringify(obj);
@@ -384,9 +379,10 @@ let relayChain = Promise.resolve();
 async function handleAgentEvent(evt) {
   if (evt.type === 'ready') {
     agentBusy = !!evt.busy;
+    pendingQueue = evt.queue || [];
     console.log(`agentd ready (busy=${evt.busy}, queued=${evt.queued}, draining=${evt.draining})`);
-    // Reconcile our queue mirror with agentd's actual queue depth
-    if (!evt.queued && pendingQueue.length) { pendingQueue = []; savePendingQueue(); }
+  } else if (evt.type === 'queue') {
+    pendingQueue = evt.queue || [];
   } else if (evt.type === 'sessionStarted') {
     const conn = conns.get(evt.connId);
     if (conn) conn.sessionId = evt.sessionId;
@@ -400,10 +396,9 @@ async function handleAgentEvent(evt) {
   } else if (evt.type === 'status') {
     broadcast({ type: 'status', text: evt.text });
   } else if (evt.type === 'result') {
-    // A finished turn hands off to the next queued job (if any): it leaves the
-    // queue mirror and the agent stays busy working on it.
-    if (pendingQueue.length) { pendingQueue.shift(); savePendingQueue(); agentBusy = true; }
-    else agentBusy = false;
+    // A finished turn hands off to the next queued job (if any) — agentd's
+    // follow-up queue event updates the mirror itself.
+    agentBusy = pendingQueue.length > 0;
     broadcast({ type: 'result', ok: evt.ok, text: evt.text, sessions: evt.sessions });
   } else if (evt.type === 'error') {
     agentBusy = false;
@@ -458,9 +453,6 @@ wss.on('connection', (ws) => {
     try { msg = JSON.parse(data); } catch { return; }
 
     if (msg.type === 'interrupt') {
-      // agentd drops its whole queue on interrupt — keep the mirror in sync
-      // so reloading clients don't resurrect cancelled queued bubbles.
-      if (pendingQueue.length) { pendingQueue = []; savePendingQueue(); }
       sendToAgent({ type: 'interrupt' });
     } else if (msg.type === 'session') {
       // Client wants to resume a specific session or start fresh (null)
@@ -471,7 +463,14 @@ wss.on('connection', (ws) => {
         // Always send history on explicit selection: the client clears its
         // log expecting it, and the history handler is idempotent.
         const history = loadSessionHistory(conn.sessionId);
-        const queued = pendingQueue.filter(q => q.sessionId === conn.sessionId).map(q => q.text);
+        // A queued message whose turn just started can briefly be in both the
+        // session file and the queue mirror — don't show it twice.
+        const recentUsers = new Set(
+          history.slice(-30).filter(m => m.role === 'user').map(m => m.text)
+        );
+        const queued = pendingQueue
+          .filter(q => q.sessionId === conn.sessionId && !recentUsers.has(q.text))
+          .map(q => q.text);
         console.log(`Loaded ${history.length} messages from session history (${queued.length} queued)`);
         send({ type: 'history', messages: history, queued });
       } else {
@@ -503,12 +502,6 @@ wss.on('connection', (ws) => {
       }
       lastUserKey = dedupKey;
       lastUserAt = Date.now();
-      // Busy means this message waits in agentd's queue — remember it so a
-      // reloading client can still see its queued bubble.
-      if (agentBusy) {
-        pendingQueue.push({ sessionId: conn.sessionId, text });
-        savePendingQueue();
-      }
       agentBusy = true;
       if (!agentWs || agentWs.readyState !== WebSocket.OPEN) {
         send({ type: 'status', text: 'agent is restarting — your message is queued' });

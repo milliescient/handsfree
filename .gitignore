@@ -5,7 +5,6 @@ certs/
 .sessions.json
 .session
 .usage.json
-.queue.json
 android/app/build/
 public/handsfree.apk
 .run.lock

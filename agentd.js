@@ -129,6 +129,15 @@ let active = null;      // in-flight Query object, for interrupt
 let draining = false;   // SIGHUP received: exit once idle
 const queue = [];       // jobs waiting for the active turn to finish
 
+// The web server mirrors this queue to show queued bubbles on reload; it
+// must never guess, so report the actual contents on every change.
+function queueSnapshot() {
+  return queue.map((j) => ({ text: j.text, sessionId: j.sessionId }));
+}
+function emitQueue() {
+  emit({ type: 'queue', queue: queueSnapshot() });
+}
+
 process.on('SIGHUP', () => {
   console.log(`[drain] SIGHUP at ${new Date().toISOString()} — will restart when idle (active=${!!active}, queued=${queue.length})`);
   draining = true;
@@ -195,8 +204,11 @@ async function runTurn(job) {
     emit({ type: 'error', text: String(err.message || err), connId: job.connId });
   } finally {
     active = null;
-    if (queue.length) runTurn(queue.shift());
-    else if (draining) exitForRestart();
+    if (queue.length) {
+      const next = queue.shift();
+      emitQueue();
+      runTurn(next);
+    } else if (draining) exitForRestart();
   }
 }
 
@@ -210,7 +222,7 @@ wss.on('connection', (ws) => {
   if (webClient && webClient.readyState === 1) webClient.close();
   webClient = ws;
 
-  ws.send(JSON.stringify({ type: 'ready', busy: !!active, queued: queue.length, draining }));
+  ws.send(JSON.stringify({ type: 'ready', busy: !!active, queued: queue.length, queue: queueSnapshot(), draining }));
   while (outbox.length) ws.send(outbox.shift());
 
   ws.on('message', async (data) => {
@@ -226,12 +238,14 @@ wss.on('connection', (ws) => {
       const job = { text: msg.text.trim(), sessionId: msg.sessionId || null, connId: msg.connId };
       if (active) {
         queue.push(job);
+        emitQueue();
         emit({ type: 'status', text: 'queued — still working on the last request', connId: job.connId });
       } else {
         runTurn(job);
       }
     } else if (msg.type === 'interrupt') {
       queue.length = 0;
+      emitQueue();
       if (active) {
         try { await active.interrupt(); } catch { /* turn may have just ended */ }
       }
