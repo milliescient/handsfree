@@ -292,6 +292,9 @@ wss.on('connection', (ws) => {
       const job = { text: msg.text.trim(), sessionId: msg.sessionId || null, connId: msg.connId };
       if (active) {
         queue.push(job);
+        // Log arrivals: without this the queue is invisible in the log until
+        // the job runs, so a pre-deploy "is anything queued?" check can't work.
+        console.log(`Queued (${queue.length} waiting): "${job.text.slice(0, 60)}"`);
         emitQueue();
         emit({ type: 'status', text: 'queued — still working on the last request', connId: job.connId });
       } else {
