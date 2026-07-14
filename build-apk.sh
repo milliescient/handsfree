@@ -4,6 +4,13 @@
 set -e
 cd "$(dirname "$0")"
 
+# Refuse to build if there are uncommitted changes
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  echo "Error: Working tree is not clean. Commit your changes first."
+  git status --short
+  exit 1
+fi
+
 # Get current git SHA (short form)
 GIT_SHA=$(git rev-parse --short HEAD)
 
