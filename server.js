@@ -48,6 +48,24 @@ const APP_VERSION = (() => {
     return execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: __dirname }).toString().trim();
   } catch { return 'unknown'; }
 })();
+
+// Verify APK is in sync with current git SHA
+(() => {
+  try {
+    const indexHtml = readFileSync(path.join(__dirname, 'android/app/src/main/assets/public/index.html'), 'utf8');
+    const match = indexHtml.match(/const APP_VERSION = '([^']+)'/);
+    const apkVersion = match ? match[1] : null;
+    if (apkVersion !== APP_VERSION) {
+      // Warn loudly but keep serving — exiting here puts the supervisor into
+      // a crash-loop and takes the whole service down over a stale APK.
+      console.error(`\n[WARN] APK version mismatch (APK ${apkVersion || 'not found'}, git ${APP_VERSION}).`);
+      console.error(`Run ./build-apk.sh to rebuild; the app will prompt users to update.\n`);
+    }
+  } catch (e) {
+    // APK assets don't exist yet - that's fine for initial setup
+    console.log('[WARN] Could not verify APK version:', e.message);
+  }
+})();
 const SESSIONS_FILE = path.join(__dirname, '.sessions.json');
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const USAGE_FILE = path.join(__dirname, '.usage.json');

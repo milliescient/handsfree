@@ -19,8 +19,11 @@ echo "Building APK for commit $GIT_SHA"
 # Update version in index.html (this gets bundled in the APK)
 sed -i "s/const APP_VERSION = '[^']*';/const APP_VERSION = '$GIT_SHA';/" public/index.html
 
-# Copy HTML to Android assets
+# Copy HTML to Android assets, then restore the repo copy so the tree stays
+# clean — the SHA only needs to live in the bundled assets, and a dirty
+# version line would make the clean-tree check above refuse the next build.
 cp public/index.html android/app/src/main/assets/public/index.html
+git checkout -- public/index.html
 
 # Build the APK
 cd android
