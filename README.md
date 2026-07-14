@@ -109,7 +109,7 @@ without an Android SDK, just use the browser.
 ./deploy.sh "what changed"
 ```
 
-Commits nothing by itself — it rebuilds the APK at HEAD, restarts the web
+Commits everything, rebuilds the APK at the new HEAD, restarts the web
 server (free), and SIGHUPs the agent daemon so it restarts with new code once
 its queue drains. Client (`public/index.html`) changes require reinstalling
 the APK on the phone; server changes take effect immediately.
