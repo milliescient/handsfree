@@ -187,7 +187,7 @@ let serverHost = location.host;
 const isApp = !location.host || location.protocol === 'file:' || location.host === 'localhost' || !!(window.Capacitor || window.AudioBridge);
 
 // App version - git SHA, set by build-apk.sh
-const APP_VERSION = 'e8b7e56';
+const APP_VERSION = '5f31f9f';
 
 // Show APK download button in browser only
 if (!isApp) {
@@ -573,6 +573,10 @@ function connect() {
         // If server sent audio, play it; otherwise fall back to browser TTS
         if (m.audio) {
           playServerAudio(m.audio, m.text);
+          // Mark as spoken so speak() doesn't repeat it with browser TTS
+          const clean = speakable(m.text);
+          const sentences = clean.split(/(?<=[.!?])\s+/);
+          sentences.forEach(s => spokenSentences.add(s));
         } else {
           speakBrief(m.text);
         }
@@ -591,9 +595,9 @@ function connect() {
           console.log('Saved new session ID:', currentSessionId);
         }
       }
-      // Only speak result.text if provided; lastReply was already spoken via speakBrief
+      // Only speak result.text if provided; lastReply was already spoken via speakBrief/playServerAudio
       if (m.text) { lastReply = m.text; speak(m.text); }
-      else if (handsFree && !ttsSpeaking && ttsQueue.length === 0) startListening();
+      else if (handsFree && !ttsSpeaking && !audioPlaying && ttsQueue.length === 0 && audioQueue.length === 0) startListening();
     }
   };
 }
