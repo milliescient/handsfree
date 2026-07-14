@@ -165,11 +165,14 @@ function setNavActive(page) {
   else navChat.classList.add('active');
 }
 
+let userOnSessionsPage = false; // Track if user explicitly navigated to sessions
+
 function showPage(page) {
   hostPicker.style.display = 'none';
   sessionPicker.style.display = 'none';
   log.style.display = 'none';
   setNavActive(page);
+  userOnSessionsPage = (page === 'sessions');
   if (page === 'hosts') {
     showHostPicker();
   } else if (page === 'sessions') {
@@ -187,7 +190,9 @@ let serverHost = location.host;
 const isApp = !location.host || location.protocol === 'file:' || location.host === 'localhost' || !!(window.Capacitor || window.AudioBridge);
 
 // App version - git SHA, set by build-apk.sh
-const APP_VERSION = '6212069';
+const APP_VERSION = '301f96e';
+const CODE_VERSION = 'v2-delayed-bargein'; // Change this when updating VAD logic
+console.log('Code version:', CODE_VERSION);
 
 // Show APK download button in browser only
 if (!isApp) {
@@ -492,8 +497,8 @@ function connect() {
     console.error('WebSocket error:', err);
     workdirEl.textContent = 'connection error';
   };
-  ws.onclose = () => {
-    console.log('WebSocket closed');
+  ws.onclose = (event) => {
+    console.log('WebSocket closed, code:', event.code, 'reason:', event.reason, 'wasClean:', event.wasClean);
     dot.classList.remove('on');
     workdirEl.textContent = 'disconnected — retrying…';
     // Don't reset sessionChosen on reconnect - user already picked in this browser session
@@ -545,7 +550,12 @@ function connect() {
       }
 
       // Show sessions page when connected (unless user already chose a session)
-      if (!sessionChosen) {
+      // But don't override if user explicitly navigated to sessions page
+      if (userOnSessionsPage) {
+        console.log('User on sessions page, staying there');
+        showSessionPicker(cachedSessions);
+        setNavActive('sessions');
+      } else if (!sessionChosen) {
         console.log('Showing sessions page');
         showSessionPicker(cachedSessions);
         setNavActive('sessions');
@@ -696,8 +706,49 @@ async function initVAD() {
     }
 
     myvad = await vad.MicVAD.new({
+      positiveSpeechThreshold: 0.95,  // Higher = less sensitive (default 0.5)
+      negativeSpeechThreshold: 0.5,   // Higher = needs clearer silence to stop (default 0.35)
+      minSpeechFrames: 10,            // Require more frames before triggering (default 3)
       onSpeechStart: () => {
-        // Barge-in: cancel all audio when user starts speaking
+        // Don't stop audio yet - wait for onSpeechEnd to confirm it's real speech
+        // Just show a subtle indicator
+        if (!interimEl) interimEl = add('interim', '');
+        interimEl.textContent = '… listening...';
+      },
+      onSpeechEnd: async (audio) => {
+        // Check audio energy - reject if too quiet (likely noise/muted mic)
+        let energy = 0;
+        let maxSample = 0;
+        for (let i = 0; i < audio.length; i++) {
+          energy += audio[i] * audio[i];
+          if (Math.abs(audio[i]) > maxSample) maxSample = Math.abs(audio[i]);
+        }
+        energy = Math.sqrt(energy / audio.length);
+        const duringPlayback = audioPlaying || audioQueue.length > 0;
+        console.log('VAD trigger - energy:', energy.toFixed(4), 'max:', maxSample.toFixed(4), 'samples:', audio.length, 'during_playback:', duringPlayback);
+
+        // Send debug info to server for logging
+        if (ws && ws.readyState === 1) {
+          ws.send(JSON.stringify({
+            type: 'vad_debug',
+            energy: energy,
+            maxSample: maxSample,
+            samples: audio.length,
+            duringPlayback: duringPlayback,
+            timestamp: Date.now()
+          }));
+        }
+
+        // Use higher threshold during playback to prevent false barge-ins
+        const threshold = duringPlayback ? 0.15 : 0.05;
+        if (energy < threshold) {
+          console.log('Audio too quiet, ignoring (threshold:', threshold, ')');
+          if (interimEl) { interimEl.remove(); interimEl = null; }
+          if (handsFree && !agentBusy) setTimeout(startListening, 200);
+          return;
+        }
+
+        // Now we know it's real speech - do barge-in
         stopServerAudio();
         if (ttsSpeaking || ttsQueue.length > 0) {
           if (hasNativeTTS()) {
@@ -708,10 +759,7 @@ async function initVAD() {
           ttsQueue.length = 0;
           ttsSpeaking = false;
         }
-        if (!interimEl) interimEl = add('interim', '');
-        interimEl.textContent = '… listening...';
-      },
-      onSpeechEnd: async (audio) => {
+
         listening = false;
         micBtn.classList.remove('listening');
         setState('transcribing');

@@ -446,15 +446,20 @@ wss.on('connection', (ws) => {
       send({ type: 'status', text: 'interrupted' });
     } else if (msg.type === 'session') {
       // Client wants to resume a specific session or start fresh (null)
-      sessionId = msg.id || null;
+      const newSessionId = msg.id || null;
+      const sameSession = (newSessionId === sessionId && sessionChosen);
+      sessionId = newSessionId;
       sessionChosen = true;
       if (sessionId) {
         console.log('Client selected session:', sessionId);
-        // Load and send conversation history
-        const history = loadSessionHistory(sessionId);
-        console.log(`Loaded ${history.length} messages from session history`);
-        send({ type: 'history', messages: history });
-        // Don't send status after history - it can cause issues
+        // Only send history if it's a new session selection, not a reconnect
+        if (!sameSession) {
+          const history = loadSessionHistory(sessionId);
+          console.log(`Loaded ${history.length} messages from session history`);
+          send({ type: 'history', messages: history });
+        } else {
+          console.log('Same session, skipping history reload');
+        }
       } else {
         console.log('Client starting new session');
         send({ type: 'status', text: 'Starting new session...' });
@@ -481,12 +486,32 @@ wss.on('connection', (ws) => {
       } else {
         runTurn(msg.text);
       }
+    } else if (msg.type === 'vad_debug') {
+      // Log VAD debug info for analyzing false triggers
+      console.log(`[VAD] energy=${msg.energy.toFixed(4)} max=${msg.maxSample.toFixed(4)} samples=${msg.samples} playback=${msg.duringPlayback}`);
     } else if (msg.type === 'transcribe' && msg.audio) {
       // Handle transcription over WebSocket (for Android where fetch to self-signed cert fails)
       console.log('Received transcribe request, audio length:', msg.audio.length);
       try {
         const audioBuffer = Buffer.from(msg.audio, 'base64');
-        console.log('Transcribing audio, size:', audioBuffer.length);
+        // Calculate audio energy from 16-bit PCM samples (skip 44-byte WAV header)
+        let energy = 0, maxSample = 0;
+        for (let i = 44; i < audioBuffer.length - 1; i += 2) {
+          const sample = audioBuffer.readInt16LE(i) / 32768.0;
+          energy += sample * sample;
+          if (Math.abs(sample) > maxSample) maxSample = Math.abs(sample);
+        }
+        const numSamples = (audioBuffer.length - 44) / 2;
+        energy = Math.sqrt(energy / numSamples);
+        console.log(`[AUDIO] energy=${energy.toFixed(4)} max=${maxSample.toFixed(4)} samples=${numSamples} size=${audioBuffer.length}`);
+
+        // Reject silent audio on server side as backup
+        if (energy < 0.005) {
+          console.log('[AUDIO] Rejecting silent audio (energy < 0.005)');
+          send({ type: 'transcription', text: '' });
+          return;
+        }
+
         const result = await transcribeAudio(audioBuffer, 'audio/wav');
         console.log('Sending transcription response to client');
         send({ type: 'transcription', text: result.text || '' });
