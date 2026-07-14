@@ -422,7 +422,9 @@ wss.on('connection', (ws) => {
           for (const block of blocks) {
             if (block.type === 'text' && block.text.trim()) {
               // Try to synthesize speech for this text
+              console.log('Synthesizing speech for:', block.text.slice(0, 50));
               const tts = await synthesizeSpeech(block.text);
+              console.log('TTS result:', tts ? 'got audio ' + tts.audio.length + ' bytes' : 'no audio');
               if (tts) {
                 send({ type: 'assistant', text: block.text, audio: tts.audio });
               } else {
