@@ -167,6 +167,10 @@ let listening = false;
 let agentBusy = false;
 let handsFree = false;
 let interimEl = null;
+// One timer per in-flight transcription (FIFO — responses arrive in order).
+// A single shared slot orphaned the older timer when utterances overlapped,
+// firing bogus "Transcription timed out" errors after successful replies.
+let transcribeTimers = [];
 let sessionChosen = false;
 let currentSessionId = localStorage.getItem('handsfree_session') || null; // Persist across reloads
 let cachedSessions = []; // Store sessions from server
@@ -737,11 +741,9 @@ function connect() {
       }
     }
     else if (m.type === 'transcription') {
-      // Handle transcription result from server
-      if (window._transcribeTimeout) {
-        clearTimeout(window._transcribeTimeout);
-        window._transcribeTimeout = null;
-      }
+      // Handle transcription result from server — clear the oldest pending
+      // timer (responses come back in request order).
+      if (transcribeTimers.length) clearTimeout(transcribeTimers.shift());
       console.log('Transcription received:', m.text ? m.text.slice(0, 50) : m.error);
       if (interimEl) { interimEl.remove(); interimEl = null; }
       if (m.error) {
@@ -1029,14 +1031,13 @@ async function initVAD() {
         // Timeout: if no response in 30s, reset state
         const transcribeTimeout = setTimeout(() => {
           console.error('Transcription timeout');
+          transcribeTimers = transcribeTimers.filter(t => t !== transcribeTimeout);
           if (interimEl) { interimEl.remove(); interimEl = null; }
           add('error', 'Transcription timed out');
           setState('idle');
           if (handsFree && !agentBusy) startListening();
         }, 30000);
-
-        // Store timeout so we can clear it when response arrives
-        window._transcribeTimeout = transcribeTimeout;
+        transcribeTimers.push(transcribeTimeout);
 
         try {
           const audioBlob = float32ToWav(audio);
@@ -1049,7 +1050,8 @@ async function initVAD() {
             if (ws && ws.readyState === 1) {
               ws.send(JSON.stringify({ type: 'transcribe', audio: base64 }));
             } else {
-              clearTimeout(window._transcribeTimeout);
+              clearTimeout(transcribeTimeout);
+              transcribeTimers = transcribeTimers.filter(t => t !== transcribeTimeout);
               if (interimEl) { interimEl.remove(); interimEl = null; }
               add('error', 'Not connected to server');
               setState('idle');
@@ -1057,7 +1059,8 @@ async function initVAD() {
           };
           reader.readAsDataURL(audioBlob);
         } catch (err) {
-          clearTimeout(window._transcribeTimeout);
+          clearTimeout(transcribeTimeout);
+          transcribeTimers = transcribeTimers.filter(t => t !== transcribeTimeout);
           console.error('Transcription error:', err);
           if (interimEl) { interimEl.remove(); interimEl = null; }
           add('error', 'Transcription failed: ' + err.message);
