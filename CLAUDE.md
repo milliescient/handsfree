@@ -52,7 +52,9 @@ Simply restarting the server is NOT enough for HTML changes to take effect in th
 
 ## Server process management — READ BEFORE RESTARTING ANYTHING
 
-Two processes, both supervised by `run.sh` (single instance via `.run.lock`):
+Two processes, both supervised by `run.sh` (single instance via `.run.lock`).
+The supervisor normally runs under the systemd user service `handsfree`
+(installed by `install-service.sh`, auto-started at boot via lingering):
 
 - `server.js` — web layer: HTTPS, phone WebSocket, transcription, TTS relay.
 - `agentd.js` — agent daemon: runs YOUR turns via the Agent SDK on
@@ -72,4 +74,7 @@ What this means for you:
   EADDRINUSE restarts on 2026-07-13).
 - NEVER use `pkill -f` with a pattern containing "server.js", "agentd.js",
   or "run.sh" — it kills your own shell wrapper. Kill by port or PID file.
+- NEVER run `systemctl --user stop/restart handsfree` mid-turn — it kills
+  the whole cgroup, including agentd and you. If a task truly requires it,
+  run it detached with a delay as the very last action, like deploy.sh.
 - Keys live in the git-ignored `.env`; don't move them to shell env.

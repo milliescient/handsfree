@@ -112,18 +112,38 @@ if [ ! -f .env ]; then
 
 # Optional: port (default 8443)
 # PORT=8443
+
+# Optional: default working directory for new sessions (default: your home)
+# WORKDIR=/home/you/projects
 EOF
     echo "✓ Created .env file (edit to add your keys)"
+fi
+
+# Install and start as a systemd user service when available (recommended:
+# survives logouts and reboots). Falls back to manual ./run.sh instructions.
+echo
+if systemctl --user show-environment > /dev/null 2>&1; then
+    echo "Installing systemd user service..."
+    ./install-service.sh
+    STARTED_AS_SERVICE=1
+else
+    echo "NOTE: no systemd user manager found — start manually with ./run.sh"
 fi
 
 echo
 echo "=== Setup Complete ==="
 echo
-echo "Start everything (web server + agent daemon, supervised):"
-echo "  ./run.sh"
+if [ -n "$STARTED_AS_SERVICE" ]; then
+    echo "Handsfree is running as a service (starts automatically at boot):"
+    echo "  systemctl --user status handsfree    # check it"
+    echo "  systemctl --user restart handsfree   # restart it"
+else
+    echo "Start everything (web server + agent daemon, supervised):"
+    echo "  ./run.sh"
+fi
 echo
 echo "Each session picks its working directory in the app (default: your"
-echo "home directory; pass a path to run.sh to change the default)."
+echo "home directory; set the WORKDIR env var to change the default)."
 echo
-echo "Then open the printed https:// URL on your phone or browser."
+echo "Open the https:// URL printed in .server.log on your phone or browser."
 echo

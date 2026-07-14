@@ -13,15 +13,18 @@ app is the only thing that compiles).
 ## Quick start
 
 ```bash
-./setup.sh                    # install dependencies, check configuration
-./run.sh
+./setup.sh    # install dependencies, check configuration, start the service
 ```
 
-Each session has its own working directory, chosen in the app when you start
-a new session (defaults to your home directory). Passing a path to `run.sh`
-just changes that default.
+On machines with systemd, setup installs and starts a **user service**
+(`handsfree`) that survives logouts and reboots. Without systemd, start
+everything manually with `./run.sh`.
 
-The server prints URLs like:
+Each session has its own working directory, chosen in the app when you start
+a new session (defaults to your home directory; `WORKDIR` in `.env` changes
+that default).
+
+The server prints URLs (in `.server.log` when running as a service) like:
 
 ```
 Open on this machine:  https://localhost:8443/
@@ -35,6 +38,23 @@ generated automatically on first run (requires `openssl`).
 Auth note: the SDK spawns the Claude Code CLI under the hood, so if this
 machine is already logged in to Claude Code it will generally just work;
 otherwise set `ANTHROPIC_API_KEY`.
+
+## Running as a service
+
+`./install-service.sh` (run automatically by setup on systemd machines)
+installs a systemd **user** service that wraps the `run.sh` supervisor and
+enables lingering so it starts at boot without a login:
+
+```bash
+systemctl --user status handsfree     # is it up?
+systemctl --user restart handsfree    # full restart (kills in-flight turns)
+journalctl --user -u handsfree        # supervisor output; app logs stay in
+                                      # .server.log and .agentd.log
+```
+
+If a manually-started `./run.sh` is already running, the installer leaves it
+alone unless invoked as `./install-service.sh --takeover`, which stops the
+manual processes and hands everything to the service.
 
 ## Architecture
 
@@ -98,7 +118,7 @@ the APK on the phone; server changes take effect immediately.
 
 | What | How |
 | --- | --- |
-| Default working directory for new sessions | first CLI arg to `run.sh`, or `WORKDIR` env var (default: home directory); each session remembers its own |
+| Default working directory for new sessions | `WORKDIR` in `.env` (or first CLI arg to a manual `run.sh`); default: home directory. Each session remembers its own |
 | Port | `PORT` env var (default 8443) |
 | Local Whisper | `WHISPER_URL` env var (default `http://127.0.0.1:9876/transcribe`) |
 | Local TTS | `TTS_URL` env var (default `http://127.0.0.1:9877/synthesize`) |
