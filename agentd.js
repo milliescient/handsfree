@@ -141,6 +141,10 @@ function emitQueue() {
 // Two clients can hear the same utterance and submit slightly different
 // transcriptions ("cute" vs "cued"), which slips past the server's exact-match
 // dedup. Catch near-duplicates here by word overlap within a short window.
+// The window must stay tight: twins of one utterance arrive within a second
+// or two, but a user deliberately queuing similar messages ("queuing another"
+// / "queuing yet another") needs several seconds just to say the second one —
+// a 20s window ate those legitimate messages.
 const recentJobs = []; // { words: Set, norm: string, at: ms }
 function normText(text) {
   return text.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
@@ -170,7 +174,7 @@ function isNearDuplicate(text) {
   if (!words.size) return false;
   const now = Date.now();
   for (const r of recentJobs) {
-    if (now - r.at > 20000) continue;
+    if (now - r.at > 3000) continue;
     let inter = 0;
     for (const w of words) if (r.words.has(w)) inter++;
     const jaccard = inter / (words.size + r.words.size - inter);
