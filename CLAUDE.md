@@ -42,15 +42,24 @@ Simply restarting the server is NOT enough for HTML changes to take effect in th
 
 ## Server process management — READ BEFORE RESTARTING ANYTHING
 
-The server runs under a supervisor (`run.sh`, single instance enforced by
-`.run.lock`) that automatically restarts `node server.js` within 2 seconds of
-any exit, picking up code changes.
+Two processes, both supervised by `run.sh` (single instance via `.run.lock`):
 
-- To restart the server (after editing server.js, or from build-apk.sh):
-  run `fuser -k 8443/tcp` and NOTHING else. The supervisor brings it back.
-- NEVER run `node server.js` or `./run.sh` yourself — a second copy fights
-  over port 8443 and crash-loops (this caused thousands of EADDRINUSE
-  restarts and constant phone reconnects on 2026-07-13).
-- NEVER use `pkill -f` with a pattern containing "server.js" or "run.sh" —
-  it kills your own shell wrapper (and you with it). Kill by port or PID.
-- Keys/token live in the git-ignored `.env`; don't move them to shell env.
+- `server.js` — web layer: HTTPS, phone WebSocket, transcription, TTS relay.
+- `agentd.js` — agent daemon: runs YOUR turns via the Agent SDK on
+  ws://127.0.0.1:9878. You are a child of agentd, NOT of the web server.
+
+What this means for you:
+
+- You may restart the web server anytime with `fuser -k 8443/tcp` — it does
+  NOT end your turn. The phone reconnects in ~2s and keeps streaming.
+- `./deploy.sh` restarts agentd via SIGHUP, which waits for your current
+  turn to finish before restarting. Your deploy turn survives; agentd picks
+  up new code before the NEXT turn.
+- NEVER kill agentd directly (`.agentd.pid`, port 9878) — that kills you
+  mid-turn. Let deploy.sh's SIGHUP drain handle it.
+- NEVER run `node server.js`, `node agentd.js`, or `./run.sh` yourself —
+  duplicate copies fight over ports and crash-loop (caused thousands of
+  EADDRINUSE restarts on 2026-07-13).
+- NEVER use `pkill -f` with a pattern containing "server.js", "agentd.js",
+  or "run.sh" — it kills your own shell wrapper. Kill by port or PID file.
+- Keys live in the git-ignored `.env`; don't move them to shell env.

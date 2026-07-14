@@ -8,3 +8,5 @@ certs/
 android/app/build/
 public/handsfree.apk
 .run.lock
+.agentd.log
+.agentd.pid

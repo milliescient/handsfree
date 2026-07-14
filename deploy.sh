@@ -25,5 +25,13 @@ else
 fi
 
 # build-apk.sh requires the clean tree we just ensured, stamps the APK with
-# HEAD's SHA, builds, and restarts the server via the supervisor.
+# HEAD's SHA, builds, and restarts the web server via the supervisor.
 ./build-apk.sh
+
+# Restart agentd gracefully: SIGHUP means "finish the current turn and queue,
+# then exit"; the supervisor restarts it with the new code. An in-flight turn
+# (e.g. the voice agent running this very deploy) is never killed.
+if [ -f .agentd.pid ] && kill -0 "$(cat .agentd.pid)" 2>/dev/null; then
+  kill -HUP "$(cat .agentd.pid)"
+  echo "agentd will restart with new code after its current turn."
+fi

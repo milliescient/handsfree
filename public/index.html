@@ -522,6 +522,9 @@ function connect() {
     const m = JSON.parse(ev.data);
     if (m.type === 'hello') {
       workdirEl.textContent = m.workdir;
+      // A turn may still be running in agentd from before we (re)connected —
+      // set busy so progress updates are rendered and spoken.
+      if (m.busy) { agentBusy = true; setState('working'); micBtn.classList.add('busy'); }
       cachedSessions = m.sessions || [];
       const numSessions = cachedSessions.length;
       console.log('hello: sessions=' + numSessions + ' sessionChosen=' + sessionChosen + ' currentSessionId=' + currentSessionId);

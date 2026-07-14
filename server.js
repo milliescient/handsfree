@@ -9,8 +9,7 @@ import { networkInterfaces } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { WebSocketServer } from 'ws';
-import { query } from '@anthropic-ai/claude-agent-sdk';
+import WebSocket, { WebSocketServer } from 'ws';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -214,25 +213,6 @@ function saveSessions(sessions) {
   try { writeFileSync(SESSIONS_FILE, JSON.stringify(sessions, null, 2)); } catch {}
 }
 
-function addOrUpdateSession(id, preview = '', lastResponse = '') {
-  const sessions = loadSessions();
-  const existing = sessions.find(s => s.id === id);
-  if (existing) {
-    existing.lastUsed = Date.now();
-    if (preview) existing.preview = preview.slice(0, 300);
-    if (lastResponse) existing.lastResponse = lastResponse.slice(0, 500);
-  } else {
-    sessions.unshift({ id, lastUsed: Date.now(), preview: preview.slice(0, 300), lastResponse: lastResponse.slice(0, 500) });
-  }
-  // Keep only last 20 sessions
-  saveSessions(sessions.slice(0, 20));
-}
-
-function getMostRecentSessionId() {
-  const sessions = loadSessions();
-  return sessions.length > 0 ? sessions[0].id : null;
-}
-
 // Load conversation history from SDK session file
 function loadSessionHistory(sessionId, maxMessages = 20) {
   const homeDir = process.env.HOME || process.env.USERPROFILE;
@@ -275,26 +255,6 @@ function loadSessionHistory(sessionId, maxMessages = 20) {
   // Return last N messages
   return messages.slice(-maxMessages);
 }
-
-const VOICE_SYSTEM_PROMPT = `
-You are operating through a hands-free voice interface. The user speaks their
-requests aloud, and every piece of text you output is read to them through
-text-to-speech.
-
-While you work: before each tool call or batch of tool calls, narrate what you
-are about to do as one short spoken phrase of under 15 words — like "Running
-the tests now" or "Found the bug, fixing the server file." These are read
-aloud as live progress updates, so always include one; never chain tool calls
-silently.
-
-When the task is done: give a fuller final summary — a short spoken paragraph
-of roughly 3 to 6 sentences covering what you did, what you found, and
-anything the user should know or decide next.
-
-Everywhere: stay conversational and use plain words. No code blocks, markdown
-formatting, bullet lists, or long file paths — text-to-speech mangles them;
-describe things in words instead. Work autonomously: never ask for
-confirmation mid-task, just do the work and summarize the outcome.`.trim();
 
 // ---------------------------------------------------------------------------
 // Self-signed cert (browsers require a secure context for microphone access,
@@ -374,15 +334,86 @@ const server = createServer(loadOrCreateCert(), async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// WebSocket: one Claude session per connection, messages queued while busy.
+// agentd link: turns run in a separate process (agentd.js) so this server can
+// restart freely — deploys, UI changes, even the agent restarting the web
+// layer — without killing an in-flight turn. Events stream back over a
+// loopback WebSocket and are relayed to every connected phone.
+// ---------------------------------------------------------------------------
+const AGENTD_URL = process.env.AGENTD_URL || 'ws://127.0.0.1:9878';
+let agentWs = null;
+const agentOutbox = []; // messages queued while agentd is down/restarting
+let agentBusy = false;  // best-effort: a turn is in flight
+const conns = new Map(); // connId -> per-phone-connection state
+let nextConnId = 1;
+
+function sendToAgent(obj) {
+  const s = JSON.stringify(obj);
+  if (agentWs && agentWs.readyState === WebSocket.OPEN) agentWs.send(s);
+  else agentOutbox.push(s);
+}
+
+function broadcast(obj) {
+  const s = JSON.stringify(obj);
+  for (const c of wss.clients) if (c.readyState === WebSocket.OPEN) c.send(s);
+}
+
+// Relay chain keeps event order: TTS synthesis awaits inline, and later
+// events (tool, result) must not overtake an assistant message mid-synthesis.
+let relayChain = Promise.resolve();
+
+async function handleAgentEvent(evt) {
+  if (evt.type === 'ready') {
+    agentBusy = !!evt.busy;
+    console.log(`agentd ready (busy=${evt.busy}, queued=${evt.queued}, draining=${evt.draining})`);
+  } else if (evt.type === 'sessionStarted') {
+    const conn = conns.get(evt.connId);
+    if (conn) conn.sessionId = evt.sessionId;
+  } else if (evt.type === 'assistant') {
+    const tts = await synthesizeSpeech(evt.text);
+    broadcast(tts ? { type: 'assistant', text: evt.text, audio: tts.audio } : { type: 'assistant', text: evt.text });
+  } else if (evt.type === 'tool') {
+    broadcast({ type: 'tool', text: evt.text });
+  } else if (evt.type === 'status') {
+    broadcast({ type: 'status', text: evt.text });
+  } else if (evt.type === 'result') {
+    agentBusy = false;
+    broadcast({ type: 'result', ok: evt.ok, text: evt.text, sessions: evt.sessions });
+  } else if (evt.type === 'error') {
+    agentBusy = false;
+    broadcast({ type: 'error', text: evt.text });
+  }
+}
+
+function connectAgentd() {
+  agentWs = new WebSocket(AGENTD_URL);
+  agentWs.on('open', () => {
+    console.log('Connected to agentd');
+    while (agentOutbox.length) agentWs.send(agentOutbox.shift());
+  });
+  agentWs.on('message', (data) => {
+    let evt;
+    try { evt = JSON.parse(data); } catch { return; }
+    relayChain = relayChain.then(() => handleAgentEvent(evt)).catch((e) => console.error('relay error:', e));
+  });
+  agentWs.on('close', () => {
+    console.log('agentd link down, retrying in 1s');
+    setTimeout(connectAgentd, 1000);
+  });
+  agentWs.on('error', () => { /* close handler reconnects */ });
+}
+connectAgentd();
+
+// ---------------------------------------------------------------------------
+// WebSocket: phone connections. Session choice lives here; turns run in agentd.
 // ---------------------------------------------------------------------------
 const wss = new WebSocketServer({ server, maxPayload: 50 * 1024 * 1024 }); // 50MB max for audio
 
 wss.on('connection', (ws) => {
   console.log('New WebSocket connection');
   const send = (obj) => { if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(obj)); };
-  let sessionId = null; // Will be set by client via 'session' message or on first turn
-  let sessionChosen = false; // Track whether user has explicitly chosen a session
+  const connId = nextConnId++;
+  const conn = { sessionId: null, sessionChosen: false };
+  conns.set(connId, conn);
 
   // Heartbeat to keep connection alive
   ws.isAlive = true;
@@ -391,106 +422,27 @@ wss.on('connection', (ws) => {
   ws.on('error', (err) => {
     console.error('WebSocket error:', err.message);
   });
-  let active = null; // in-flight Query object, for interrupt
-  const pending = []; // utterances queued while a turn is running
-  let lastUserMessage = '';
 
-  send({ type: 'hello', workdir: WORKDIR, sessions: loadSessions(), version: SERVED_APK_VERSION });
-
-  function toolSummary(block) {
-    const input = block.input || {};
-    const detail =
-      input.command || input.description || input.file_path || input.pattern ||
-      input.query || input.prompt || '';
-    return `${block.name} ${String(detail).slice(0, 120)}`.trim();
-  }
-
-  async function runTurn(text) {
-    let lastAssistantText = '';
-    const requestedSessionId = sessionId; // Remember what we asked for
-    console.log(`runTurn: requested resume=${requestedSessionId || 'new session'}`);
-    active = query({
-      prompt: text,
-      options: {
-        cwd: WORKDIR,
-        model: 'claude-fable-5',
-        ...(sessionId ? { resume: sessionId } : {}),
-        permissionMode: 'bypassPermissions',
-        allowDangerouslySkipPermissions: true,
-        systemPrompt: { type: 'preset', preset: 'claude_code', append: VOICE_SYSTEM_PROMPT },
-      },
-    });
-    try {
-      for await (const m of active) {
-        if (m.type === 'system' && m.subtype === 'init') {
-          console.log(`SDK init: got session_id=${m.session_id}, requested=${requestedSessionId}`);
-          if (requestedSessionId && m.session_id !== requestedSessionId) {
-            console.warn(`Session mismatch! Requested ${requestedSessionId} but got ${m.session_id}`);
-          }
-          sessionId = m.session_id;
-          addOrUpdateSession(sessionId, lastUserMessage);
-        } else if (m.type === 'assistant') {
-          const blocks = m.message?.content ?? m.content ?? [];
-          for (const block of blocks) {
-            if (block.type === 'text' && block.text.trim()) {
-              // Try to synthesize speech for this text
-              console.log('Synthesizing speech for:', block.text.slice(0, 50));
-              const tts = await synthesizeSpeech(block.text);
-              console.log('TTS result:', tts ? 'got audio ' + tts.audio.length + ' bytes' : 'no audio');
-              if (tts) {
-                send({ type: 'assistant', text: block.text, audio: tts.audio });
-              } else {
-                send({ type: 'assistant', text: block.text });
-              }
-              lastAssistantText = block.text; // Track last response
-            } else if (block.type === 'tool_use') {
-              send({ type: 'tool', text: toolSummary(block) });
-            }
-          }
-        } else if (m.type === 'result') {
-          const errored = m.subtype && m.subtype !== 'success';
-          // Update session with last response
-          console.log(`Result: sessionId=${sessionId}, lastAssistantText length=${lastAssistantText.length}, preview="${lastAssistantText.slice(0,50)}"`);
-          if (sessionId && lastAssistantText) {
-            addOrUpdateSession(sessionId, lastUserMessage, lastAssistantText);
-          }
-          send({
-            type: 'result',
-            ok: !errored,
-            text: m.result || (errored ? `Turn ended: ${m.subtype}` : ''),
-            sessions: loadSessions(), // Send updated sessions list
-          });
-        }
-      }
-    } catch (err) {
-      send({ type: 'error', text: String(err.message || err) });
-    } finally {
-      active = null;
-      if (pending.length && ws.readyState === ws.OPEN) runTurn(pending.shift());
-    }
-  }
+  // busy lets a phone that reconnects mid-turn know work is still in flight
+  send({ type: 'hello', workdir: WORKDIR, sessions: loadSessions(), version: SERVED_APK_VERSION, busy: agentBusy });
 
   ws.on('message', async (data) => {
     let msg;
     try { msg = JSON.parse(data); } catch { return; }
 
     if (msg.type === 'interrupt') {
-      pending.length = 0;
-      if (active) {
-        try { await active.interrupt(); } catch { /* turn may have just ended */ }
-      }
-      send({ type: 'status', text: 'interrupted' });
+      sendToAgent({ type: 'interrupt' });
     } else if (msg.type === 'session') {
       // Client wants to resume a specific session or start fresh (null)
       const newSessionId = msg.id || null;
-      const sameSession = (newSessionId === sessionId && sessionChosen);
-      sessionId = newSessionId;
-      sessionChosen = true;
-      if (sessionId) {
-        console.log('Client selected session:', sessionId);
+      const sameSession = (newSessionId === conn.sessionId && conn.sessionChosen);
+      conn.sessionId = newSessionId;
+      conn.sessionChosen = true;
+      if (conn.sessionId) {
+        console.log('Client selected session:', conn.sessionId);
         // Only send history if it's a new session selection, not a reconnect
         if (!sameSession) {
-          const history = loadSessionHistory(sessionId);
+          const history = loadSessionHistory(conn.sessionId);
           console.log(`Loaded ${history.length} messages from session history`);
           send({ type: 'history', messages: history });
         } else {
@@ -509,19 +461,17 @@ wss.on('connection', (ws) => {
       // Send updated sessions list back to client
       send({ type: 'sessionsUpdated', sessions: updated });
     } else if (msg.type === 'user' && typeof msg.text === 'string' && msg.text.trim()) {
-      lastUserMessage = msg.text.trim();
-      console.log(`Received user message, current sessionId=${sessionId}, sessionChosen=${sessionChosen}`);
-      if (!sessionChosen) {
+      console.log(`Received user message, sessionId=${conn.sessionId}, sessionChosen=${conn.sessionChosen}`);
+      if (!conn.sessionChosen) {
         console.warn('User message received before session was chosen, ignoring');
         send({ type: 'error', text: 'Please select a session first' });
         return;
       }
-      if (active) {
-        pending.push(msg.text);
-        send({ type: 'status', text: 'queued — still working on the last request' });
-      } else {
-        runTurn(msg.text);
+      agentBusy = true;
+      if (!agentWs || agentWs.readyState !== WebSocket.OPEN) {
+        send({ type: 'status', text: 'agent is restarting — your message is queued' });
       }
+      sendToAgent({ type: 'user', text: msg.text.trim(), sessionId: conn.sessionId, connId });
     } else if (msg.type === 'vad_debug') {
       // Log VAD debug info for analyzing false triggers
       console.log(`[VAD] energy=${msg.energy.toFixed(4)} max=${msg.maxSample.toFixed(4)} samples=${msg.samples} playback=${msg.duringPlayback}`);
@@ -569,8 +519,9 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('close', () => {
-    pending.length = 0;
-    if (active) active.interrupt().catch(() => {});
+    // Turns keep running in agentd when the phone drops — reconnect and the
+    // event stream resumes. Only an explicit interrupt stops work.
+    conns.delete(connId);
   });
 });
 
