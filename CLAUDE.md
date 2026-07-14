@@ -1,5 +1,22 @@
 # Handsfree Project Notes
 
+## Shipping changes — ALWAYS use ./deploy.sh
+
+To ship any change, run exactly one command:
+
+```bash
+./deploy.sh "commit message"
+```
+
+It commits everything, rebuilds the APK, and restarts the server, in that
+order. NEVER run git commit, build-apk.sh, or a server restart as separate
+steps — partial deploys caused version drift and an update loop where the
+app reinstalled a stale APK forever.
+
+The restart at the end kills the server your session runs inside, ending
+your turn. Speak your summary FIRST, then run ./deploy.sh as the final
+action. If your turn dies there, the deploy still completed.
+
 ## APK Build Process
 
 The Android APK bundles a copy of `public/index.html` inside the app at build time. Changes to the HTML require rebuilding the APK.
