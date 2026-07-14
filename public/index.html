@@ -186,9 +186,33 @@ let serverHost = location.host;
 // Check if we're running in the app - Capacitor uses localhost or has the native bridge
 const isApp = !location.host || location.protocol === 'file:' || location.host === 'localhost' || !!(window.Capacitor || window.AudioBridge);
 
-// Show APK download button only in browser, not in app
+// App version - git SHA, set by build-apk.sh
+const APP_VERSION = 'dev';
+
+// Show APK download button in browser only
 if (!isApp) {
   document.getElementById('apkBtn').style.display = 'block';
+}
+
+// Called from Android if update fails
+window.onUpdateError = function(msg) {
+  add('error', 'Update failed: ' + msg);
+};
+
+// Check for updates and prompt user
+function checkForUpdate(serverVersion) {
+  if (!isApp) return;
+  // If versions differ and neither is unknown/dev, offer update
+  if (serverVersion && APP_VERSION && serverVersion !== APP_VERSION &&
+      serverVersion !== 'unknown' && APP_VERSION !== 'dev') {
+    if (confirm('A new version (' + serverVersion + ') is available. You have ' + APP_VERSION + '. Update now?')) {
+      if (window.AudioBridge && typeof window.AudioBridge.installUpdate === 'function') {
+        const apkUrl = 'https://' + serverHost + '/handsfree.apk';
+        add('status', 'Downloading update...');
+        window.AudioBridge.installUpdate(apkUrl);
+      }
+    }
+  }
 }
 
 function loadHosts() {
@@ -435,6 +459,9 @@ function connect() {
       const numSessions = cachedSessions.length;
       console.log('hello: sessions=' + numSessions + ' sessionChosen=' + sessionChosen + ' currentSessionId=' + currentSessionId);
 
+      // Check for app updates
+      if (m.version) checkForUpdate(m.version);
+
       // Check if we have a saved session from localStorage that still exists on server
       if (currentSessionId) {
         const savedSession = cachedSessions.find(s => s.id === currentSessionId);
@@ -523,7 +550,19 @@ function connect() {
     }
     else if (m.type === 'tool') add('tool', '⚙ ' + m.text);
     else if (m.type === 'status') add('status', m.text);
-    else if (m.type === 'assistant') { console.log('assistant msg:', m.text.slice(0,50)); add('claude', m.text); lastReply = m.text; if (agentBusy) speakBrief(m.text); }
+    else if (m.type === 'assistant') {
+      console.log('assistant msg:', m.text.slice(0,50), 'hasAudio:', !!m.audio);
+      add('claude', m.text);
+      lastReply = m.text;
+      if (agentBusy) {
+        // If server sent audio, play it; otherwise fall back to browser TTS
+        if (m.audio) {
+          playServerAudio(m.audio, m.text);
+        } else {
+          speakBrief(m.text);
+        }
+      }
+    }
     else if (m.type === 'error') { agentBusy = false; setState('idle'); micBtn.classList.remove('busy'); add('error', m.text); speak('Something went wrong: ' + m.text); }
     else if (m.type === 'result') {
       agentBusy = false; setState('idle'); micBtn.classList.remove('busy');
@@ -606,7 +645,8 @@ async function initVAD() {
 
     myvad = await vad.MicVAD.new({
       onSpeechStart: () => {
-        // Barge-in: cancel TTS and clear queue when user starts speaking
+        // Barge-in: cancel all audio when user starts speaking
+        stopServerAudio();
         if (ttsSpeaking || ttsQueue.length > 0) {
           if (hasNativeTTS()) {
             window.AudioBridge.stopSpeaking();
@@ -705,6 +745,64 @@ function stopListening() {
 }
 
 // ---------------- Text to speech ----------------
+// Queue for server-generated audio
+let audioQueue = [];
+let audioPlaying = false;
+
+// Play audio received from server (base64 WAV)
+function playServerAudio(base64Audio, text) {
+  console.log('playServerAudio queuing:', text.slice(0, 50));
+  audioQueue.push({ audio: base64Audio, text });
+  if (!audioPlaying) {
+    playNextAudio();
+  }
+}
+
+function playNextAudio() {
+  if (audioQueue.length === 0) {
+    audioPlaying = false;
+    if (!agentBusy) setState('idle');
+    if (handsFree && !listening && !agentBusy) startListening();
+    return;
+  }
+
+  audioPlaying = true;
+  const item = audioQueue.shift();
+  setState(agentBusy ? 'working' : 'speaking');
+
+  // Start VAD during playback for barge-in detection
+  if (handsFree && !listening) startListening();
+
+  try {
+    const audio = new Audio('data:audio/wav;base64,' + item.audio);
+    audio.onended = () => {
+      console.log('Audio playback ended');
+      playNextAudio();
+    };
+    audio.onerror = (e) => {
+      console.error('Audio playback error:', e);
+      // Fall back to browser TTS if audio fails
+      speakBrief(item.text);
+      playNextAudio();
+    };
+    audio.play().catch(e => {
+      console.error('Audio play failed:', e);
+      speakBrief(item.text);
+      playNextAudio();
+    });
+  } catch (e) {
+    console.error('Audio creation failed:', e);
+    speakBrief(item.text);
+    playNextAudio();
+  }
+}
+
+// Stop server audio playback (for barge-in)
+function stopServerAudio() {
+  audioQueue.length = 0;
+  audioPlaying = false;
+}
+
 function speakable(text) {
   return text
     .replace(/```[\s\S]*?```/g, ' (code omitted) ')
@@ -841,6 +939,7 @@ function speakBrief(text) {
 micBtn.onclick = () => { unlockTTS(); listening ? stopListening() : startListening(); };
 
 stopBtn.onclick = () => {
+  stopServerAudio();
   if (hasNativeTTS()) {
     window.AudioBridge.stopSpeaking();
   } else if ('speechSynthesis' in window) {

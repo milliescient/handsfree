@@ -41,11 +41,41 @@ process.on('unhandledRejection', (err) => {
 
 const PORT = Number(process.env.PORT || 8443);
 const WORKDIR = path.resolve(process.argv[2] || process.env.WORKDIR || process.cwd());
+
+// App version - uses git SHA, computed at startup
+const APP_VERSION = (() => {
+  try {
+    return execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: __dirname }).toString().trim();
+  } catch { return 'unknown'; }
+})();
 const SESSIONS_FILE = path.join(__dirname, '.sessions.json');
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const USAGE_FILE = path.join(__dirname, '.usage.json');
 // Local Whisper server (faster-whisper on GPU) - falls back to OpenAI if unavailable
 const LOCAL_WHISPER_URL = process.env.WHISPER_URL || 'http://127.0.0.1:9876/transcribe';
+// Local TTS server (Piper) - falls back to browser speech synthesis if unavailable
+const LOCAL_TTS_URL = process.env.TTS_URL || 'http://127.0.0.1:9877/synthesize';
+
+// Synthesize text to speech using local Piper server
+async function synthesizeSpeech(text) {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30000);
+    const res = await fetch(LOCAL_TTS_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    if (!res.ok) throw new Error(`TTS server returned ${res.status}`);
+    const audioBuffer = await res.arrayBuffer();
+    return { audio: Buffer.from(audioBuffer).toString('base64'), source: 'local' };
+  } catch (err) {
+    console.log('Local TTS unavailable:', err.message);
+    return null; // Client will fall back to browser speech synthesis
+  }
+}
 
 // Transcribe audio using local Whisper server, falling back to OpenAI API
 async function transcribeAudio(audioBuffer, contentType = 'audio/wav') {
@@ -329,7 +359,7 @@ wss.on('connection', (ws) => {
   const pending = []; // utterances queued while a turn is running
   let lastUserMessage = '';
 
-  send({ type: 'hello', workdir: WORKDIR, sessions: loadSessions() });
+  send({ type: 'hello', workdir: WORKDIR, sessions: loadSessions(), version: APP_VERSION });
 
   function toolSummary(block) {
     const input = block.input || {};
@@ -366,7 +396,13 @@ wss.on('connection', (ws) => {
           const blocks = m.message?.content ?? m.content ?? [];
           for (const block of blocks) {
             if (block.type === 'text' && block.text.trim()) {
-              send({ type: 'assistant', text: block.text });
+              // Try to synthesize speech for this text
+              const tts = await synthesizeSpeech(block.text);
+              if (tts) {
+                send({ type: 'assistant', text: block.text, audio: tts.audio });
+              } else {
+                send({ type: 'assistant', text: block.text });
+              }
               lastAssistantText = block.text; // Track last response
             } else if (block.type === 'tool_use') {
               send({ type: 'tool', text: toolSummary(block) });
