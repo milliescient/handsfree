@@ -603,8 +603,19 @@ function connect() {
     if (m.type === 'hello') {
       workdirEl.textContent = m.workdir;
       // A turn may still be running in agentd from before we (re)connected —
-      // set busy so progress updates are rendered and spoken.
-      if (m.busy) { agentBusy = true; showWorking(); micBtn.classList.add('busy'); }
+      // set busy so progress updates are rendered and spoken. And if the
+      // agent is idle, drop any stale busy state left over from a message
+      // that was deduplicated away or an interrupt we never saw.
+      if (m.busy) {
+        agentBusy = true; showWorking(); micBtn.classList.add('busy');
+      } else {
+        for (const el of queuedEls) {
+          el.classList.remove('queued');
+          el.querySelector('.queued-note')?.remove();
+        }
+        queuedEls = [];
+        agentBusy = false; hideWorking(); micBtn.classList.remove('busy');
+      }
       cachedSessions = m.sessions || [];
       const numSessions = cachedSessions.length;
       console.log('hello: sessions=' + numSessions + ' sessionChosen=' + sessionChosen + ' currentSessionId=' + currentSessionId);
@@ -722,6 +733,18 @@ function connect() {
           ws.send(JSON.stringify({ type: 'debug', msg: 'History loaded, children=' + log.children.length + ' display=' + log.style.display }));
         }
       }
+    }
+    else if (m.type === 'dropped') {
+      // Our copy of the utterance was deduplicated away (another client's
+      // transcription won). The message still runs — as its twin — so the
+      // bubble stays, but it must stop claiming to be queued.
+      const i = queuedEls.findIndex(el => el.firstChild && el.firstChild.nodeValue === m.text);
+      if (i !== -1) {
+        const el = queuedEls.splice(i, 1)[0];
+        el.classList.remove('queued');
+        el.querySelector('.queued-note')?.remove();
+      }
+      if (!m.busy) { agentBusy = false; hideWorking(); micBtn.classList.remove('busy'); setState('idle'); }
     }
     else if (m.type === 'tool') add('tool', '⚙ ' + m.text);
     else if (m.type === 'status') {

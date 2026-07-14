@@ -262,6 +262,9 @@ wss.on('connection', (ws) => {
       }
       if (isNearDuplicate(msg.text.trim())) {
         console.log(`Dropping near-duplicate transcription: "${msg.text.trim().slice(0, 60)}"`);
+        // Tell the submitting client, or its queued bubble waits forever for
+        // a turn that will never come.
+        emit({ type: 'dropped', text: msg.text.trim(), connId: msg.connId, busy: !!active });
         return;
       }
       const job = { text: msg.text.trim(), sessionId: msg.sessionId || null, connId: msg.connId };

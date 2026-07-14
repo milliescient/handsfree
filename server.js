@@ -386,6 +386,11 @@ async function handleAgentEvent(evt) {
   } else if (evt.type === 'sessionStarted') {
     const conn = conns.get(evt.connId);
     if (conn) conn.sessionId = evt.sessionId;
+  } else if (evt.type === 'dropped') {
+    // agentd rejected a near-duplicate; only the submitting client has a
+    // bubble for this exact transcription, so target it.
+    const conn = conns.get(evt.connId);
+    if (conn && conn.send) conn.send({ type: 'dropped', text: evt.text, busy: !!evt.busy });
   } else if (evt.type === 'assistant') {
     console.log('Synthesizing speech for:', evt.text.slice(0, 50));
     const tts = await synthesizeSpeech(evt.text);
@@ -434,7 +439,7 @@ wss.on('connection', (ws) => {
   console.log('New WebSocket connection');
   const send = (obj) => { if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(obj)); };
   const connId = nextConnId++;
-  const conn = { sessionId: null, sessionChosen: false };
+  const conn = { sessionId: null, sessionChosen: false, send };
   conns.set(connId, conn);
 
   // Heartbeat to keep connection alive
@@ -503,6 +508,9 @@ wss.on('connection', (ws) => {
       const dedupKey = `${conn.sessionId}\n${text}`;
       if (dedupKey === lastUserKey && Date.now() - lastUserAt < 10000) {
         console.log('Dropping duplicate user message (multiple clients):', text.slice(0, 50));
+        // Only tell the submitter — the client whose copy was accepted has a
+        // bubble with the same text that really is queued or running.
+        send({ type: 'dropped', text, busy: agentBusy });
         return;
       }
       lastUserKey = dedupKey;
