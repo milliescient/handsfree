@@ -1241,6 +1241,9 @@ const tts = {
   // Only server audio has a volume control; native/web speech can't duck.
   ducked: false,
   duck(on) {
+    // Log transitions: a false duck at playback start silences the first
+    // words of a reply, and only the server log can tell us it happened.
+    if (this.ducked !== on) dbg('[DUCK] ' + (on ? 'on' : 'off') + ' at t=' + (this.currentAudio ? this.currentAudio.currentTime.toFixed(2) : 'n/a'));
     this.ducked = on;
     if (this.currentAudio) this.currentAudio.volume = on ? 0.15 : 1.0;
   },

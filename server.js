@@ -84,6 +84,40 @@ const LOCAL_WHISPER_URL = process.env.WHISPER_URL || 'http://127.0.0.1:9876/tran
 // Local TTS server (Piper) - falls back to browser speech synthesis if unavailable
 const LOCAL_TTS_URL = process.env.TTS_URL || 'http://127.0.0.1:9877/synthesize';
 
+// Prepend a short silence to a PCM WAV. Piper's audio starts speaking at
+// sample zero, and phones swallow the first fraction of a second while the
+// output path wakes up — users heard replies with the first words missing.
+function padWavStart(buf, ms = 300) {
+  try {
+    if (buf.length < 44 || buf.toString('ascii', 0, 4) !== 'RIFF' ||
+        buf.toString('ascii', 8, 12) !== 'WAVE') return buf;
+    const byteRate = buf.readUInt32LE(28);
+    const blockAlign = buf.readUInt16LE(32) || 2;
+    let off = 12; // walk chunks to find 'data'
+    while (off + 8 <= buf.length) {
+      const id = buf.toString('ascii', off, off + 4);
+      const size = buf.readUInt32LE(off + 4);
+      if (id === 'data') {
+        let silenceBytes = Math.floor((byteRate * ms) / 1000);
+        silenceBytes -= silenceBytes % blockAlign;
+        const out = Buffer.concat([
+          buf.slice(0, off + 8),
+          Buffer.alloc(silenceBytes),
+          buf.slice(off + 8),
+        ]);
+        out.writeUInt32LE(size + silenceBytes, off + 4);
+        out.writeUInt32LE(out.length - 8, 4);
+        return out;
+      }
+      off += 8 + size + (size % 2);
+    }
+    return buf;
+  } catch (err) {
+    console.log('padWavStart failed, sending audio unpadded:', err.message);
+    return buf;
+  }
+}
+
 // Synthesize text to speech using local Piper server
 async function synthesizeSpeech(text) {
   try {
@@ -98,7 +132,8 @@ async function synthesizeSpeech(text) {
     clearTimeout(timeout);
     if (!res.ok) throw new Error(`TTS server returned ${res.status}`);
     const audioBuffer = await res.arrayBuffer();
-    return { audio: Buffer.from(audioBuffer).toString('base64'), source: 'local' };
+    const padded = padWavStart(Buffer.from(audioBuffer));
+    return { audio: padded.toString('base64'), source: 'local' };
   } catch (err) {
     console.log('Local TTS unavailable:', err.message);
     return null; // Client will fall back to browser speech synthesis
