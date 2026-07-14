@@ -451,8 +451,8 @@ connectAgentd();
 // ---------------------------------------------------------------------------
 const wss = new WebSocketServer({ server, maxPayload: 50 * 1024 * 1024 }); // 50MB max for audio
 
-wss.on('connection', (ws) => {
-  console.log('New WebSocket connection');
+wss.on('connection', (ws, req) => {
+  console.log(`New WebSocket connection from ${req.socket.remoteAddress} UA=${req.headers['user-agent'] || 'unknown'}`);
   const send = (obj) => { if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(obj)); };
   const connId = nextConnId++;
   const conn = { sessionId: null, sessionChosen: false, send };
