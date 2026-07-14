@@ -267,20 +267,25 @@ function hideDownloadingOverlay() {
   if (overlay) overlay.remove();
 }
 
-// Check for updates and prompt user
-let updatePromptShown = false;
+// Check for updates and prompt user. The app page stays alive across many
+// deploys, so a one-shot boolean latch here silenced every deploy after the
+// first "Later" tap. Track the version we prompted for instead: the same
+// version never nags twice, but each NEW server version prompts again.
+let promptedVersion = null;
 function checkForUpdate(serverVersion) {
   if (!isApp) return;
-  if (updatePromptShown) return; // Don't prompt repeatedly
+  if (serverVersion === promptedVersion) return; // Don't prompt repeatedly
   // If versions differ and neither is unknown/dev, offer update
   if (serverVersion && APP_VERSION && serverVersion !== APP_VERSION &&
       serverVersion !== 'unknown' && APP_VERSION !== 'dev') {
-    updatePromptShown = true;
+    promptedVersion = serverVersion;
     showUpdateDialog(serverVersion);
   }
 }
 
 function showUpdateDialog(serverVersion) {
+  const existing = document.getElementById('updateDialog');
+  if (existing) existing.remove(); // replace a stale dialog from an older version
   const dialog = document.createElement('div');
   dialog.id = 'updateDialog';
   dialog.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.8);display:flex;align-items:center;justify-content:center;z-index:9999;';
