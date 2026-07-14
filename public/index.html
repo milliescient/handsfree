@@ -187,7 +187,7 @@ let serverHost = location.host;
 const isApp = !location.host || location.protocol === 'file:' || location.host === 'localhost' || !!(window.Capacitor || window.AudioBridge);
 
 // App version - git SHA, set by build-apk.sh
-const APP_VERSION = 'ab462b6';
+const APP_VERSION = 'def48a0';
 
 // Show APK download button in browser only
 if (!isApp) {
@@ -779,10 +779,11 @@ function stopListening() {
 // Queue for server-generated audio
 let audioQueue = [];
 let audioPlaying = false;
+let currentAudio = null;
 
 // Play audio received from server (base64 WAV)
 function playServerAudio(base64Audio, text) {
-  console.log('playServerAudio queuing:', text.slice(0, 50));
+  console.log('playServerAudio queuing:', text.slice(0, 50), 'queueLen:', audioQueue.length, 'playing:', audioPlaying);
   audioQueue.push({ audio: base64Audio, text });
   if (!audioPlaying) {
     playNextAudio();
@@ -792,6 +793,7 @@ function playServerAudio(base64Audio, text) {
 function playNextAudio() {
   if (audioQueue.length === 0) {
     audioPlaying = false;
+    currentAudio = null;
     if (!agentBusy) setState('idle');
     if (handsFree && !listening && !agentBusy) startListening();
     return;
@@ -805,24 +807,28 @@ function playNextAudio() {
   if (handsFree && !listening) startListening();
 
   try {
-    const audio = new Audio('data:audio/wav;base64,' + item.audio);
-    audio.onended = () => {
+    currentAudio = new Audio('data:audio/wav;base64,' + item.audio);
+    currentAudio.onended = () => {
       console.log('Audio playback ended');
+      currentAudio = null;
       playNextAudio();
     };
-    audio.onerror = (e) => {
+    currentAudio.onerror = (e) => {
       console.error('Audio playback error:', e);
+      currentAudio = null;
       // Fall back to browser TTS if audio fails
       speakBrief(item.text);
       playNextAudio();
     };
-    audio.play().catch(e => {
+    currentAudio.play().catch(e => {
       console.error('Audio play failed:', e);
+      currentAudio = null;
       speakBrief(item.text);
       playNextAudio();
     });
   } catch (e) {
     console.error('Audio creation failed:', e);
+    currentAudio = null;
     speakBrief(item.text);
     playNextAudio();
   }
@@ -830,6 +836,10 @@ function playNextAudio() {
 
 // Stop server audio playback (for barge-in)
 function stopServerAudio() {
+  if (currentAudio) {
+    currentAudio.pause();
+    currentAudio = null;
+  }
   audioQueue.length = 0;
   audioPlaying = false;
 }
