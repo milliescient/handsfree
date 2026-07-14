@@ -187,7 +187,7 @@ let serverHost = location.host;
 const isApp = !location.host || location.protocol === 'file:' || location.host === 'localhost' || !!(window.Capacitor || window.AudioBridge);
 
 // App version - git SHA, set by build-apk.sh
-const APP_VERSION = '5f31f9f';
+const APP_VERSION = 'e63d7a7';
 
 // Show APK download button in browser only
 if (!isApp) {
@@ -908,6 +908,11 @@ let lastQueued = '';
 function speakRaw(clean) {
   if (!clean) {
     if (handsFree && !agentBusy) startListening();
+    return;
+  }
+  // If server audio is playing or queued, don't use browser/native TTS
+  if (audioPlaying || audioQueue.length > 0) {
+    console.log('speakRaw SKIPPED - server audio active');
     return;
   }
   if (!hasNativeTTS() && !('speechSynthesis' in window)) {
