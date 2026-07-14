@@ -939,7 +939,17 @@ function float32ToWav(float32Array, sampleRate = 16000) {
   return new Blob([buffer], { type: 'audio/wav' });
 }
 
-async function initVAD() {
+// Singleton init: vadReady only flips at the END of a seconds-long async
+// setup, so two overlapping startListening calls both passed the check and
+// built TWO live mic VADs. myvad kept only the last; the orphan listened and
+// submitted transcriptions forever — duplicate messages from one device, and
+// a mic that stayed hot after stopListening.
+let vadInitPromise = null;
+function initVAD() {
+  if (!vadInitPromise) vadInitPromise = doInitVAD();
+  return vadInitPromise;
+}
+async function doInitVAD() {
   if (vadReady) return;
   try {
     console.log('Initializing VAD...');
@@ -950,6 +960,7 @@ async function initVAD() {
     } catch (micErr) {
       console.error('Mic permission denied:', micErr);
       add('error', 'Microphone permission denied: ' + micErr.message);
+      vadInitPromise = null; // allow retry
       return;
     }
 
@@ -1089,6 +1100,7 @@ async function initVAD() {
     console.error('VAD init failed:', err);
     add('error', 'VAD init failed: ' + (err.message || err));
     setState('idle');
+    vadInitPromise = null; // allow retry
   }
 }
 
