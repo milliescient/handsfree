@@ -187,7 +187,7 @@ let serverHost = location.host;
 const isApp = !location.host || location.protocol === 'file:' || location.host === 'localhost' || !!(window.Capacitor || window.AudioBridge);
 
 // App version - git SHA, set by build-apk.sh
-const APP_VERSION = 'dev';
+const APP_VERSION = 'e8b7e56';
 
 // Show APK download button in browser only
 if (!isApp) {
@@ -196,8 +196,14 @@ if (!isApp) {
 
 // Called from Android if update fails
 window.onUpdateError = function(msg) {
+  hideDownloadingOverlay();
   add('error', 'Update failed: ' + msg);
 };
+
+function hideDownloadingOverlay() {
+  const overlay = document.getElementById('downloadOverlay');
+  if (overlay) overlay.remove();
+}
 
 // Check for updates and prompt user
 function checkForUpdate(serverVersion) {
@@ -205,14 +211,23 @@ function checkForUpdate(serverVersion) {
   // If versions differ and neither is unknown/dev, offer update
   if (serverVersion && APP_VERSION && serverVersion !== APP_VERSION &&
       serverVersion !== 'unknown' && APP_VERSION !== 'dev') {
-    if (confirm('A new version (' + serverVersion + ') is available. You have ' + APP_VERSION + '. Update now?')) {
+    if (confirm('New version ' + serverVersion + ' available.\nYou have ' + APP_VERSION + '.\n\nUpdate now?')) {
       if (window.AudioBridge && typeof window.AudioBridge.installUpdate === 'function') {
         const apkUrl = 'https://' + serverHost + '/handsfree.apk';
-        add('status', 'Downloading update...');
+        showDownloadingOverlay();
         window.AudioBridge.installUpdate(apkUrl);
       }
     }
   }
+}
+
+// Show a fullscreen overlay while downloading update
+function showDownloadingOverlay() {
+  const overlay = document.createElement('div');
+  overlay.id = 'downloadOverlay';
+  overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:var(--bg);display:flex;align-items:center;justify-content:center;flex-direction:column;z-index:9999;';
+  overlay.innerHTML = '<div style="font-size:24px;margin-bottom:16px;">Downloading update...</div><div style="color:var(--dim);">Please wait</div>';
+  document.body.appendChild(overlay);
 }
 
 function loadHosts() {
