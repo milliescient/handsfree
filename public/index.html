@@ -570,14 +570,18 @@ let queueReconcileTimer = null;
 function reconcileQueue() {
   if (!lastQueueSnapshot) return;
   const inQueue = new Set(lastQueueSnapshot);
-  let deferred = false;
+  let deferred = false, unqueued = false;
   queuedEls = queuedEls.filter(el => {
     const text = el.firstChild ? el.firstChild.nodeValue : '';
     if (inQueue.has(text)) return true;
     if (Date.now() - (el._qtime || 0) < 4000) { deferred = true; return true; }
     clearQueuedLook(el);
+    unqueued = true;
     return false;
   });
+  // Move the working indicator below any bubble that just left the queue —
+  // it now belongs to the running conversation, not the waiting pile.
+  if (unqueued) { pinBottomEls(); scrollLog(); }
   clearTimeout(queueReconcileTimer);
   if (deferred) queueReconcileTimer = setTimeout(reconcileQueue, 4200);
   if (queuedEls.length === 0 && queueEditMode) setQueueEditMode(false);
@@ -874,10 +878,13 @@ function connect() {
     else if (m.type === 'result') {
       if (queuedEls.length > 0) {
         // A queued message starts the next turn right away: unpin its bubble
-        // (it stays at the bottom, the new turn's messages follow it) and
-        // stay in the busy state.
+        // and stay in the busy state. Re-pin so the working indicator moves
+        // below the now-running message — an illuminated bubble under the
+        // working line reads as "not started yet".
         const next = queuedEls.shift();
         clearQueuedLook(next);
+        pinBottomEls();
+        scrollLog();
       } else {
         agentBusy = false; hideWorking(); setState('idle'); micBtn.classList.remove('busy');
       }
