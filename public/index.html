@@ -454,7 +454,10 @@ function selectSession(id) {
   }
 
   if (ws && ws.readyState === 1) {
+    console.log('Sending session selection to server:', id);
     ws.send(JSON.stringify({ type: 'session', id }));
+  } else {
+    console.log('WebSocket not ready, cannot send session:', ws?.readyState);
   }
 }
 
