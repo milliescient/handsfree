@@ -1057,7 +1057,7 @@ async function doInitVAD() {
           }
           tts.duck(false); // false alarm: restore full playback volume
           if (interimEl) { interimEl.remove(); interimEl = null; }
-          if (handsFree && !agentBusy) setTimeout(startListening, 200);
+          if (handsFree) setTimeout(startListening, 200);
           return;
         }
 
@@ -1083,7 +1083,7 @@ async function doInitVAD() {
           if (interimEl) { interimEl.remove(); interimEl = null; }
           add('error', 'Transcription timed out');
           setState('idle');
-          if (handsFree && !agentBusy) startListening();
+          if (handsFree) startListening();
         }, 30000);
         transcribeTimers.push(transcribeTimeout);
 
@@ -1114,7 +1114,11 @@ async function doInitVAD() {
           add('error', 'Transcription failed: ' + err.message);
           setState('idle');
         }
-        if (handsFree && !agentBusy) setTimeout(startListening, 800);
+        // Re-arm even while the agent is busy: hands-free users queue
+        // messages mid-turn, and without this the mic only came back when
+        // the next TTS narration started playing — during quiet stretches
+        // of a long turn the mic looked dead.
+        if (handsFree) setTimeout(startListening, 800);
       },
       onnxWASMBasePath: "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/",
       baseAssetPath: "https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.29/dist/",
