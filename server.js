@@ -533,7 +533,9 @@ wss.on('connection', (ws, req) => {
           .filter(q => q.sessionId === conn.sessionId && !recentUsers.has(q.text))
           .map(q => q.text);
         console.log(`Loaded ${history.length} messages from session history (${queued.length} queued)`);
-        send({ type: 'history', messages: history, queued });
+        // Tag with the session so the client can drop a response that arrives
+        // after the user has already switched to a different session.
+        send({ type: 'history', sessionId: conn.sessionId, messages: history, queued });
       } else {
         console.log('Client starting new session');
         send({ type: 'status', text: 'Starting new session...' });

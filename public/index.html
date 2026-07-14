@@ -475,7 +475,6 @@ function deleteSession(id) {
   showSessionPicker(cachedSessions);
 }
 
-let pendingHistoryLoad = false; // Track if we're waiting for history
 let lastSelectedSession = null; // Prevent duplicate selections
 
 function selectSession(id) {
@@ -504,7 +503,6 @@ function selectSession(id) {
 
   // Clear chat log - history will be loaded from server
   log.innerHTML = '';
-  pendingHistoryLoad = !!id; // Expect history if resuming existing session
 
   if (!id) {
     add('status', 'Started new session');
@@ -745,10 +743,6 @@ function connect() {
             setFooterVisible(true);
             scrollLog();
             setNavActive('chat');
-            // Allow history to load if log is empty (e.g., after page refresh)
-            if (log.children.length === 0) {
-              pendingHistoryLoad = true;
-            }
           }
           return;
         } else {
@@ -804,6 +798,13 @@ function connect() {
       // Server sent conversation history for resumed session
       const count = m.messages?.length || 0;
       console.log('Received history:', count, 'messages');
+      // A history response can arrive after the user has already switched
+      // sessions (e.g. auto-resume racing a "start new session" tap) — a
+      // stale one would repopulate the chat with the old session. Drop it.
+      if (m.sessionId !== currentSessionId) {
+        console.log('Ignoring stale history for session', m.sessionId, 'current:', currentSessionId);
+        return;
+      }
       // Send debug to server so we can see it in logs
       if (ws && ws.readyState === 1) {
         ws.send(JSON.stringify({ type: 'debug', msg: 'Client received history: ' + count + ' messages' }));
