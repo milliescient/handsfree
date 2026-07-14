@@ -36,6 +36,7 @@
   .msg { max-width: 88%; padding: 10px 14px; border-radius: 14px; white-space: pre-wrap; word-break: break-word; }
   .user { align-self: flex-end; background: var(--accent); color: #fff; border-bottom-right-radius: 4px; }
   .msg.queued { opacity: .55; }
+  .queued-note { font-size: 11px; font-style: italic; opacity: .8; margin-top: 4px; }
   .claude { align-self: flex-start; background: var(--panel); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
   .tool, .status { align-self: flex-start; font-size: 12px; color: var(--dim); padding: 0 4px; font-family: ui-monospace, monospace; }
   .error { align-self: flex-start; color: var(--err); font-size: 13px; padding: 0 4px; }
@@ -695,7 +696,10 @@ function connect() {
       }
     }
     else if (m.type === 'tool') add('tool', '⚙ ' + m.text);
-    else if (m.type === 'status') add('status', m.text);
+    else if (m.type === 'status') {
+      // The queued note is shown attached to the queued bubble instead.
+      if (!m.text.startsWith('queued')) add('status', m.text);
+    }
     else if (m.type === 'assistant') {
       console.log('assistant msg:', m.text.slice(0,50), 'hasAudio:', !!m.audio);
       add('claude', m.text);
@@ -721,6 +725,7 @@ function connect() {
         // stay in the busy state.
         const next = queuedEls.shift();
         next.classList.remove('queued');
+        next.querySelector('.queued-note')?.remove();
       } else {
         agentBusy = false; hideWorking(); setState('idle'); micBtn.classList.remove('busy');
       }
@@ -755,7 +760,12 @@ function sendUser(text) {
   ws.send(JSON.stringify({ type: 'user', text }));
   if (agentBusy) {
     // Agent is mid-turn: this message is queued, keep it pinned at the bottom
+    // with the note attached to the bubble so it can't scroll away from it.
     el.classList.add('queued');
+    const note = document.createElement('div');
+    note.className = 'queued-note';
+    note.textContent = 'queued — still working on the last request';
+    el.appendChild(note);
     queuedEls.push(el);
     pinBottomEls();
     scrollLog();
