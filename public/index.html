@@ -230,6 +230,21 @@ const APP_VERSION = '4fa54a5';
 const CODE_VERSION = 'v2-delayed-bargein'; // Change this when updating VAD logic
 console.log('Code version:', CODE_VERSION);
 
+// Relay diagnostics to the server log — the phone's WebView console is
+// invisible during hands-free use, so this is our only remote view.
+function dbg(msg) {
+  console.log(msg);
+  try {
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'debug', msg }));
+  } catch (e) { /* never let logging break the app */ }
+}
+window.addEventListener('error', (e) => {
+  dbg('[JSERROR] ' + e.message + ' @ ' + (e.filename || '') + ':' + (e.lineno || ''));
+});
+window.addEventListener('unhandledrejection', (e) => {
+  dbg('[JSERROR] unhandled rejection: ' + (e.reason && (e.reason.message || e.reason)));
+});
+
 // Show APK download button in browser only
 if (!isApp) {
   document.getElementById('apkBtn').style.display = 'block';
@@ -949,22 +964,32 @@ function initVAD() {
   if (!vadInitPromise) vadInitPromise = doInitVAD();
   return vadInitPromise;
 }
+// A hung step (permission dialog dropped by the WebView, stalled CDN fetch)
+// would leave the singleton promise pending forever, so every step races a
+// timeout; the failure path resets vadInitPromise so the next tap retries.
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, rej) => setTimeout(() => rej(new Error(label + ' timed out after ' + ms / 1000 + 's')), ms)),
+  ]);
+}
 async function doInitVAD() {
   if (vadReady) return;
   try {
-    console.log('Initializing VAD...');
+    dbg('[VADINIT] starting, vad lib loaded=' + (typeof vad !== 'undefined'));
     // First request mic permission explicitly
     try {
-      await navigator.mediaDevices.getUserMedia({ audio: true });
-      console.log('Mic permission granted');
+      await withTimeout(navigator.mediaDevices.getUserMedia({ audio: true }), 15000, 'mic permission');
+      dbg('[VADINIT] mic permission granted');
     } catch (micErr) {
-      console.error('Mic permission denied:', micErr);
+      dbg('[VADINIT] mic permission failed: ' + micErr.message);
       add('error', 'Microphone permission denied: ' + micErr.message);
+      setState('idle');
       vadInitPromise = null; // allow retry
       return;
     }
 
-    myvad = await vad.MicVAD.new({
+    myvad = await withTimeout(vad.MicVAD.new({
       positiveSpeechThreshold: 0.7,   // Lower = more sensitive (default 0.5)
       negativeSpeechThreshold: 0.35,  // Default value
       minSpeechFrames: 5,             // Fewer frames needed to trigger (default 3)
@@ -1093,11 +1118,11 @@ async function doInitVAD() {
       },
       onnxWASMBasePath: "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/",
       baseAssetPath: "https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.29/dist/",
-    });
+    }), 30000, 'VAD model load');
     vadReady = true;
-    console.log('VAD initialized successfully');
+    dbg('[VADINIT] VAD initialized successfully');
   } catch (err) {
-    console.error('VAD init failed:', err);
+    dbg('[VADINIT] VAD init failed: ' + (err.message || err));
     add('error', 'VAD init failed: ' + (err.message || err));
     setState('idle');
     vadInitPromise = null; // allow retry
@@ -1121,7 +1146,7 @@ async function startListening() {
     setState('listening');
     console.log('VAD started successfully');
   } else {
-    console.log('VAD not available!');
+    dbg('[VADINIT] startListening: VAD not available after init');
   }
 }
 
