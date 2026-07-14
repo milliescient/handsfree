@@ -49,8 +49,8 @@ node server.js /path/to/your/project  # the directory Claude will work in
 The server prints URLs like:
 
 ```
-Open on this machine:  https://localhost:8443/?key=a1b2c3d4e5f6a7b8
-Open on your phone:    https://192.168.1.20:8443/?key=a1b2c3d4e5f6a7b8
+Open on this machine:  https://localhost:8443/
+Open on your phone:    https://192.168.1.20:8443/
 ```
 
 Open the phone URL (same Wi-Fi network), tap through the self-signed
@@ -67,20 +67,22 @@ otherwise set `ANTHROPIC_API_KEY`.
 | Working directory | first CLI arg, or `WORKDIR` env var (default: cwd) |
 | Port | `PORT` env var (default 8443) |
 | Local Whisper | `WHISPER_URL` env var (default `http://127.0.0.1:9876/transcribe`) |
-| Access token | `TOKEN` env var (default: random per start, shown in the URL) |
 
 ### Off your home network
 
 The LAN URL only works on the same Wi-Fi. For phone access from anywhere, use
-[Tailscale](https://tailscale.com) and open `https://<tailscale-ip>:8443/?key=…`.
+[Tailscale](https://tailscale.com) and open `https://<tailscale-ip>:8443/`.
 Avoid exposing the port to the public internet.
 
 ## Security
 
 This grants **unattended agent control of the machine** (no permission
-prompts) to anyone with the URL. The random token in the URL is the only lock:
-don't share it, don't run this on untrusted networks, and prefer Tailscale
-over port-forwarding.
+prompts) to anyone who can reach port 8443 — there is currently **no
+authentication at all** (the earlier URL-token lock was removed when the
+Android app was introduced). The only protections are network-level: keep
+the port firewalled off the LAN and reach it exclusively over Tailscale
+(or another private overlay). Never port-forward it or run it on a network
+you don't control.
 
 ## If you don't hear anything
 
