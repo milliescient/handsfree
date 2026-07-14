@@ -141,13 +141,31 @@ function emitQueue() {
 // Two clients can hear the same utterance and submit slightly different
 // transcriptions ("cute" vs "cued"), which slips past the server's exact-match
 // dedup. Catch near-duplicates here by word overlap within a short window.
-const recentJobs = []; // { words: Set, at: ms }
+const recentJobs = []; // { words: Set, norm: string, at: ms }
+function normText(text) {
+  return text.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+}
 function jobWords(text) {
-  return new Set(
-    text.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean)
-  );
+  return new Set(normText(text).split(' ').filter(Boolean));
+}
+// Word overlap misses short utterances where one word changed ("cued and
+// running" vs "cute and running" scores 0.71); character-level edit distance
+// catches those.
+function charSimilarity(a, b) {
+  const m = a.length, n = b.length;
+  if (!m || !n) return 0;
+  let prev = Array.from({ length: n + 1 }, (_, j) => j);
+  for (let i = 1; i <= m; i++) {
+    const cur = [i];
+    for (let j = 1; j <= n; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return 1 - prev[n] / Math.max(m, n);
 }
 function isNearDuplicate(text) {
+  const norm = normText(text);
   const words = jobWords(text);
   if (!words.size) return false;
   const now = Date.now();
@@ -156,9 +174,9 @@ function isNearDuplicate(text) {
     let inter = 0;
     for (const w of words) if (r.words.has(w)) inter++;
     const jaccard = inter / (words.size + r.words.size - inter);
-    if (jaccard > 0.8) return true;
+    if (jaccard > 0.8 || charSimilarity(norm, r.norm) > 0.85) return true;
   }
-  recentJobs.push({ words, at: now });
+  recentJobs.push({ words, norm, at: now });
   while (recentJobs.length > 10) recentJobs.shift();
   return false;
 }
