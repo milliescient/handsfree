@@ -369,7 +369,9 @@ async function handleAgentEvent(evt) {
     const conn = conns.get(evt.connId);
     if (conn) conn.sessionId = evt.sessionId;
   } else if (evt.type === 'assistant') {
+    console.log('Synthesizing speech for:', evt.text.slice(0, 50));
     const tts = await synthesizeSpeech(evt.text);
+    console.log('TTS result:', tts ? `got audio ${tts.audio.length} bytes` : 'no audio (client falls back)');
     broadcast(tts ? { type: 'assistant', text: evt.text, audio: tts.audio } : { type: 'assistant', text: evt.text });
   } else if (evt.type === 'tool') {
     broadcast({ type: 'tool', text: evt.text });
