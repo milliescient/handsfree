@@ -372,6 +372,20 @@ function broadcast(obj) {
   for (const c of wss.clients) if (c.readyState === WebSocket.OPEN) c.send(s);
 }
 
+// Push the authoritative queue to every client so each can reconcile its
+// queued bubbles — a message another client unqueued, a dedup drop, or a
+// turn handoff all stop looking "queued" everywhere, not just where it
+// happened.
+function broadcastQueue() {
+  for (const conn of conns.values()) {
+    if (!conn.sessionChosen) continue;
+    const queued = pendingQueue
+      .filter((q) => q.sessionId === conn.sessionId)
+      .map((q) => q.text);
+    conn.send({ type: 'queue', queued });
+  }
+}
+
 // Relay chain keeps event order: TTS synthesis awaits inline, and later
 // events (tool, result) must not overtake an assistant message mid-synthesis.
 let relayChain = Promise.resolve();
@@ -381,8 +395,10 @@ async function handleAgentEvent(evt) {
     agentBusy = !!evt.busy;
     pendingQueue = evt.queue || [];
     console.log(`agentd ready (busy=${evt.busy}, queued=${evt.queued}, draining=${evt.draining})`);
+    broadcastQueue();
   } else if (evt.type === 'queue') {
     pendingQueue = evt.queue || [];
+    broadcastQueue();
   } else if (evt.type === 'sessionStarted') {
     const conn = conns.get(evt.connId);
     if (conn) conn.sessionId = evt.sessionId;

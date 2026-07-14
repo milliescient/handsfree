@@ -544,6 +544,7 @@ function clearQueuedLook(el) {
 }
 function markQueued(el) {
   el.classList.add('queued');
+  el._qtime = Date.now(); // grace period before queue snapshots may clear it
   let lpTimer = null, lpStart = null;
   el.addEventListener('pointerdown', (e) => {
     lpStart = { x: e.clientX, y: e.clientY };
@@ -787,6 +788,22 @@ function connect() {
           ws.send(JSON.stringify({ type: 'debug', msg: 'History loaded, children=' + log.children.length + ' display=' + log.style.display }));
         }
       }
+    }
+    else if (m.type === 'queue') {
+      // Authoritative queue snapshot from agentd. Any bubble still claiming
+      // to be queued that the agent no longer has is running, was removed on
+      // another device, or lost a dedup race — stop showing it as queued.
+      // Freshly sent messages get a grace period: their snapshot may still be
+      // in flight.
+      const inQueue = new Set(m.queued || []);
+      queuedEls = queuedEls.filter(el => {
+        const text = el.firstChild ? el.firstChild.nodeValue : '';
+        if (inQueue.has(text)) return true;
+        if (Date.now() - (el._qtime || 0) < 4000) return true;
+        clearQueuedLook(el);
+        return false;
+      });
+      if (queuedEls.length === 0 && queueEditMode) setQueueEditMode(false);
     }
     else if (m.type === 'dropped') {
       // Our copy of the utterance was deduplicated away (another client's
