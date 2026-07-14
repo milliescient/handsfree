@@ -272,6 +272,18 @@ wss.on('connection', (ws) => {
       } else {
         runTurn(job);
       }
+    } else if (msg.type === 'unqueue' && typeof msg.text === 'string') {
+      // User changed their mind about a queued message; drop the first match.
+      const i = queue.findIndex(
+        (j) => j.text === msg.text && (!msg.sessionId || j.sessionId === msg.sessionId)
+      );
+      if (i !== -1) {
+        queue.splice(i, 1);
+        emitQueue();
+        console.log(`Unqueued: "${msg.text.slice(0, 60)}"`);
+      } else {
+        console.log(`Unqueue miss (not in queue): "${msg.text.slice(0, 60)}"`);
+      }
     } else if (msg.type === 'interrupt') {
       queue.length = 0;
       emitQueue();

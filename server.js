@@ -454,6 +454,11 @@ wss.on('connection', (ws) => {
 
     if (msg.type === 'interrupt') {
       sendToAgent({ type: 'interrupt' });
+    } else if (msg.type === 'unqueue' && typeof msg.text === 'string') {
+      // User removed a queued message before its turn started. agentd owns
+      // the queue; it will emit a fresh queue snapshot after removal.
+      console.log('Unqueue request:', msg.text.slice(0, 50));
+      sendToAgent({ type: 'unqueue', text: msg.text, sessionId: conn.sessionId });
     } else if (msg.type === 'session') {
       // Client wants to resume a specific session or start fresh (null)
       conn.sessionId = msg.id || null;

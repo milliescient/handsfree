@@ -37,6 +37,7 @@
   .user { align-self: flex-end; background: var(--accent); color: #fff; border-bottom-right-radius: 4px; }
   .msg.queued { opacity: .55; }
   .queued-note { display: block; font-size: 11px; font-style: italic; opacity: .8; margin-top: 4px; }
+  .queued-x { font-style: normal; font-weight: bold; margin-left: 10px; padding: 4px 8px; cursor: pointer; border: 1px solid rgba(255,255,255,.5); border-radius: 6px; }
   .claude { align-self: flex-start; background: var(--panel); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
   .tool, .status { align-self: flex-start; font-size: 12px; color: var(--dim); padding: 0 4px; font-family: ui-monospace, monospace; }
   .error { align-self: flex-start; color: var(--err); font-size: 13px; padding: 0 4px; }
@@ -491,10 +492,20 @@ function scrollLog() {
 // User messages sent while the agent is busy are queued; keep their bubbles
 // pinned at the very bottom of the chat (below the working indicator).
 let queuedEls = [];
-function makeQueuedNote() {
+function makeQueuedNote(el, text) {
   const note = document.createElement('span');
   note.className = 'queued-note';
   note.textContent = 'queued — still working on the last request';
+  const x = document.createElement('span');
+  x.className = 'queued-x';
+  x.textContent = '✕ remove';
+  x.onclick = (e) => {
+    e.stopPropagation();
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'unqueue', text }));
+    queuedEls = queuedEls.filter(q => q !== el);
+    el.remove();
+  };
+  note.appendChild(x);
   return note;
 }
 function pinBottomEls() {
@@ -698,7 +709,7 @@ function connect() {
         for (const q of queued) {
           const el = add('user', q);
           el.classList.add('queued');
-          el.appendChild(makeQueuedNote());
+          el.appendChild(makeQueuedNote(el, q));
           queuedEls.push(el);
         }
         if (queued.length > 0) { agentBusy = true; micBtn.classList.add('busy'); }
@@ -778,7 +789,7 @@ function sendUser(text) {
     // Agent is mid-turn: this message is queued — dim it, pin it at the
     // bottom, and label it inside the bubble.
     el.classList.add('queued');
-    el.appendChild(makeQueuedNote());
+    el.appendChild(makeQueuedNote(el, text));
     queuedEls.push(el);
     pinBottomEls();
     scrollLog();
