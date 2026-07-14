@@ -434,20 +434,15 @@ wss.on('connection', (ws) => {
       sendToAgent({ type: 'interrupt' });
     } else if (msg.type === 'session') {
       // Client wants to resume a specific session or start fresh (null)
-      const newSessionId = msg.id || null;
-      const sameSession = (newSessionId === conn.sessionId && conn.sessionChosen);
-      conn.sessionId = newSessionId;
+      conn.sessionId = msg.id || null;
       conn.sessionChosen = true;
       if (conn.sessionId) {
         console.log('Client selected session:', conn.sessionId);
-        // Only send history if it's a new session selection, not a reconnect
-        if (!sameSession) {
-          const history = loadSessionHistory(conn.sessionId);
-          console.log(`Loaded ${history.length} messages from session history`);
-          send({ type: 'history', messages: history });
-        } else {
-          console.log('Same session, skipping history reload');
-        }
+        // Always send history on explicit selection: the client clears its
+        // log expecting it, and the history handler is idempotent.
+        const history = loadSessionHistory(conn.sessionId);
+        console.log(`Loaded ${history.length} messages from session history`);
+        send({ type: 'history', messages: history });
       } else {
         console.log('Client starting new session');
         send({ type: 'status', text: 'Starting new session...' });
