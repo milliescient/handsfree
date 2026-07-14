@@ -7,7 +7,7 @@
 // exit 0 so the supervisor restarts us with new code). SIGTERM/SIGINT = die
 // now, losing the in-flight turn.
 
-import { readFileSync, writeFileSync, existsSync, unlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync, renameSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -28,7 +28,15 @@ const PORT = Number(process.env.AGENTD_PORT || 9878);
 // Default working directory for new sessions only — each session remembers
 // the directory it was started in (stored in the sessions registry).
 const WORKDIR = path.resolve(process.argv[2] || process.env.WORKDIR || homedir());
-const SESSIONS_FILE = path.join(__dirname, '.sessions.json');
+// Session registry lives in a hidden per-user directory (like Claude's own
+// ~/.claude) rather than inside the checkout; migrate the old in-repo file.
+const DATA_DIR = path.join(homedir(), '.handsfree');
+const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
+try {
+  mkdirSync(DATA_DIR, { recursive: true });
+  const legacy = path.join(__dirname, '.sessions.json');
+  if (!existsSync(SESSIONS_FILE) && existsSync(legacy)) renameSync(legacy, SESSIONS_FILE);
+} catch {}
 const PID_FILE = path.join(__dirname, '.agentd.pid');
 
 writeFileSync(PID_FILE, String(process.pid) + '\n');
@@ -130,6 +138,8 @@ function emit(evt) {
 // Turn runner: one turn at a time, queue while busy, drain on SIGHUP.
 // ---------------------------------------------------------------------------
 let active = null;      // in-flight Query object, for interrupt
+let activeJob = null;   // the job behind `active`, for interrupt targeting
+let activeSessionId = null; // resolved session of the active turn (set on init)
 let draining = false;   // SIGHUP received: exit once idle
 const queue = [];       // jobs waiting for the active turn to finish
 
@@ -209,6 +219,8 @@ async function runTurn(job) {
   const saved = sessionId ? loadSessions().find(s => s.id === sessionId) : null;
   const cwd = (saved && saved.cwd) || job.cwd || WORKDIR;
   console.log(`runTurn: connId=${job.connId} resume=${requested || 'new session'} cwd=${cwd} text="${job.text.slice(0, 60)}"`);
+  activeJob = job;
+  activeSessionId = sessionId;
   active = query({
     prompt: job.text,
     options: {
@@ -227,6 +239,7 @@ async function runTurn(job) {
           console.warn(`Session mismatch! Requested ${requested} but got ${m.session_id}`);
         }
         sessionId = m.session_id;
+        activeSessionId = sessionId;
         addOrUpdateSession(sessionId, job.text, '', cwd);
         emit({ type: 'sessionStarted', sessionId, connId: job.connId });
       } else if (m.type === 'assistant') {
@@ -259,6 +272,8 @@ async function runTurn(job) {
     emit({ type: 'error', text: String(err.message || err), connId: job.connId });
   } finally {
     active = null;
+    activeJob = null;
+    activeSessionId = null;
     if (queue.length) {
       const next = queue.shift();
       emitQueue();
@@ -321,12 +336,29 @@ wss.on('connection', (ws) => {
         console.log(`Unqueue miss (not in queue): "${msg.text.slice(0, 60)}"`);
       }
     } else if (msg.type === 'interrupt') {
-      queue.length = 0;
-      emitQueue();
-      if (active) {
+      // Interrupts are scoped to the requesting session so other sessions'
+      // turns and queued jobs keep running. Session ids can be briefly
+      // unknown (a new session before its init event), so also match by the
+      // connection that submitted the job. A bare interrupt (no ids, e.g.
+      // from an older web server during a rolling restart) stops everything.
+      const targeted = msg.sessionId != null || msg.connId != null;
+      const matches = (sid, cid) =>
+        !targeted ||
+        (msg.sessionId != null ? sid === msg.sessionId : cid === msg.connId);
+      const before = queue.length;
+      for (let i = queue.length - 1; i >= 0; i--) {
+        if (matches(queue[i].sessionId, queue[i].connId)) queue.splice(i, 1);
+      }
+      if (queue.length !== before) emitQueue();
+      const hitActive = active && matches(activeSessionId, activeJob && activeJob.connId);
+      if (hitActive) {
         try { await active.interrupt(); } catch { /* turn may have just ended */ }
       }
-      emit({ type: 'status', text: 'interrupted' });
+      if (hitActive || queue.length !== before) {
+        emit({ type: 'status', text: 'interrupted', connId: msg.connId });
+      } else {
+        console.log(`Interrupt for session ${msg.sessionId || '(new)'} matched nothing (active=${activeSessionId || 'none'})`);
+      }
     }
   });
 

@@ -3,7 +3,7 @@
 // messages to the Claude Agent SDK over WebSocket.
 
 import { createServer } from 'node:https';
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { networkInterfaces, homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
@@ -84,7 +84,15 @@ const SERVED_APK_VERSION = (() => {
     return html.match(/const APP_VERSION = '([^']+)'/)?.[1] ?? APP_VERSION;
   } catch { return APP_VERSION; }
 })();
-const SESSIONS_FILE = path.join(__dirname, '.sessions.json');
+// Session registry lives in a hidden per-user directory (like Claude's own
+// ~/.claude) rather than inside the checkout; migrate the old in-repo file.
+const DATA_DIR = path.join(homedir(), '.handsfree');
+const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
+try {
+  mkdirSync(DATA_DIR, { recursive: true });
+  const legacy = path.join(__dirname, '.sessions.json');
+  if (!existsSync(SESSIONS_FILE) && existsSync(legacy)) renameSync(legacy, SESSIONS_FILE);
+} catch {}
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const USAGE_FILE = path.join(__dirname, '.usage.json');
 // Local Whisper server (faster-whisper on GPU) - falls back to OpenAI if unavailable
@@ -462,7 +470,11 @@ async function handleAgentEvent(evt) {
   } else if (evt.type === 'tool') {
     broadcast({ type: 'tool', text: evt.text });
   } else if (evt.type === 'status') {
-    broadcast({ type: 'status', text: evt.text });
+    // Statuses about one client's own action (interrupted, queued) target
+    // that client; anything untargeted is for everyone.
+    const conn = evt.connId != null ? conns.get(evt.connId) : null;
+    if (conn) conn.send({ type: 'status', text: evt.text });
+    else broadcast({ type: 'status', text: evt.text });
   } else if (evt.type === 'result') {
     // A finished turn hands off to the next queued job (if any) — agentd's
     // follow-up queue event updates the mirror itself.
@@ -521,7 +533,10 @@ wss.on('connection', (ws, req) => {
     try { msg = JSON.parse(data); } catch { return; }
 
     if (msg.type === 'interrupt') {
-      sendToAgent({ type: 'interrupt' });
+      // Scope the interrupt to this client's session (falling back to the
+      // connection for a brand-new session with no id yet) so stopping one
+      // session never kills another session's turn or queued messages.
+      sendToAgent({ type: 'interrupt', sessionId: conn.sessionId, connId });
     } else if (msg.type === 'unqueue' && typeof msg.text === 'string') {
       // User removed a queued message before its turn started. agentd owns
       // the queue; it will emit a fresh queue snapshot after removal.
