@@ -1202,6 +1202,7 @@ const tts = {
   queue: [],
   speaking: false,
   currentAudio: null,
+  playGen: 0,       // bumped by stop() to cancel any playback waiting on the mic
   unlocked: false,
   lastQueued: '',
   spokenSentences: new Set(),
@@ -1250,6 +1251,7 @@ const tts = {
     this.queue.length = 0;
     this.speaking = false;
     this.ducked = false;
+    this.playGen++; // cancel any pending mic-first playback
   },
 
   // Duck (or restore) playback volume while we suspect the user is talking.
@@ -1300,20 +1302,35 @@ const tts = {
     // While busy the in-chat working indicator covers it; only label speaking
     setState(agentBusy ? 'idle' : 'speaking');
 
+    const gen = this.playGen;
+    const begin = () => {
+      // A stop() (barge-in/interrupt) may have landed while we waited
+      // for the mic; don't play a stale item over whatever came next.
+      if (gen !== this.playGen || !this.speaking) return;
+      if (item.audio) {
+        this.playServerAudio(item);
+      } else {
+        this.speakText(item.text);
+      }
+    };
+
     // Start VAD during playback so barge-in works in any mode — but hidden
     // pages (e.g. a background browser tab) keep their mic off, or every
     // open client would transcribe and submit the same speech. Hands-free
     // is exempt: the phone runs it from the background via the service.
     if (!listening && (handsFree || !document.hidden)) {
+      if (vadReady) {
+        // Opening the mic re-routes Android audio and swallows the start
+        // of anything already playing (hands-free never hits this: its
+        // mic is open before playback begins). Bring the mic up first,
+        // give the route a moment to settle, then speak.
+        startListening().then(() => setTimeout(begin, 250)).catch(() => begin());
+        return;
+      }
+      // VAD still loading: init in the background, don't hold the reply.
       startListening();
     }
-
-    // If we have server audio, play it
-    if (item.audio) {
-      this.playServerAudio(item);
-    } else {
-      this.speakText(item.text);
-    }
+    begin();
   },
 
   // Tell the server when playback falls back to device TTS, so the reason
