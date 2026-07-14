@@ -197,6 +197,7 @@ function showPage(page) {
     showSessionPicker(cachedSessions);
   } else {
     log.style.display = 'flex';
+    scrollLog(); // scrollTop writes were no-ops while hidden
   }
 }
 
@@ -480,6 +481,12 @@ function selectSession(id) {
   }
 }
 
+// Scroll the chat to the bottom on the next frame — a direct scrollTop write
+// is a no-op while the log is hidden (display:none) or before layout settles.
+function scrollLog() {
+  requestAnimationFrame(() => { log.scrollTop = log.scrollHeight; });
+}
+
 // User messages sent while the agent is busy are queued; keep their bubbles
 // pinned at the very bottom of the chat (below the working indicator).
 let queuedEls = [];
@@ -496,7 +503,7 @@ function add(cls, text) {
   log.appendChild(el);
   // Keep the working indicator and queued messages below the newest message
   if (!queuedEls.includes(el)) pinBottomEls();
-  log.scrollTop = log.scrollHeight;
+  scrollLog();
   return el;
 }
 
@@ -524,7 +531,7 @@ function showWorking() {
   workingTimer = setInterval(pick, 4000);
   log.appendChild(workingEl);
   pinBottomEls();
-  log.scrollTop = log.scrollHeight;
+  scrollLog();
 }
 function hideWorking() {
   if (workingTimer) { clearInterval(workingTimer); workingTimer = null; }
@@ -604,6 +611,7 @@ function connect() {
             hostPicker.style.display = 'none';
             sessionPicker.style.display = 'none';
             log.style.display = 'flex';
+            scrollLog();
             setNavActive('chat');
             // Allow history to load if log is empty (e.g., after page refresh)
             if (log.children.length === 0) {
@@ -636,6 +644,7 @@ function connect() {
         hostPicker.style.display = 'none';
         sessionPicker.style.display = 'none';
         log.style.display = 'flex';
+        scrollLog();
       }
     }
     else if (m.type === 'transcription') {
@@ -678,7 +687,7 @@ function connect() {
         }
         add('status', 'Loaded ' + count + ' messages');
         if (agentBusy) showWorking();
-        log.scrollTop = log.scrollHeight;
+        scrollLog();
         // Debug: report final state
         if (ws && ws.readyState === 1) {
           ws.send(JSON.stringify({ type: 'debug', msg: 'History loaded, children=' + log.children.length + ' display=' + log.style.display }));
@@ -749,7 +758,7 @@ function sendUser(text) {
     el.classList.add('queued');
     queuedEls.push(el);
     pinBottomEls();
-    log.scrollTop = log.scrollHeight;
+    scrollLog();
   }
   agentBusy = true;
   micBtn.classList.add('busy');
@@ -1246,8 +1255,10 @@ navHosts.onclick = () => showPage('hosts');
 navSessions.onclick = () => showPage('sessions');
 navChat.onclick = () => showPage('chat');
 
-// Keep the newest message visible when the viewport shrinks (e.g. keyboard)
-window.addEventListener('resize', () => { log.scrollTop = log.scrollHeight; });
+// Keep the newest message visible when the viewport shrinks (e.g. keyboard).
+// Android fires visualViewport resize for the soft keyboard, not window resize.
+window.addEventListener('resize', scrollLog);
+if (window.visualViewport) window.visualViewport.addEventListener('resize', scrollLog);
 </script>
 </body>
 </html>
