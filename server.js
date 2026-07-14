@@ -578,8 +578,10 @@ wss.on('connection', (ws, req) => {
         // after the user has already switched to a different session.
         send({ type: 'history', sessionId: conn.sessionId, messages: history, queued });
       } else {
+        // No status message here: the client already shows "Started new
+        // session in <dir>" when the user picks one, and this branch also
+        // runs on every reconnect re-assert, where a message would be noise.
         console.log('Client starting new session');
-        send({ type: 'status', text: 'Starting new session...' });
       }
     } else if (msg.type === 'deleteSession' && msg.id) {
       // Delete a session from the sessions file
