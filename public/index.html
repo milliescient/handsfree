@@ -35,9 +35,14 @@
   #log { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
   .msg { max-width: 88%; padding: 10px 14px; border-radius: 14px; white-space: pre-wrap; word-break: break-word; }
   .user { align-self: flex-end; background: var(--accent); color: #fff; border-bottom-right-radius: 4px; }
-  .msg.queued { opacity: .55; }
-  .queued-note { display: block; font-size: 11px; font-style: italic; opacity: .8; margin-top: 4px; }
-  .queued-x { font-style: normal; font-weight: bold; padding: 4px 8px; cursor: pointer; border: 1px solid rgba(255,255,255,.5); border-radius: 6px; }
+  .msg.queued { opacity: .55; position: relative; -webkit-user-select: none; user-select: none; }
+  .msg.queued.q-edit { opacity: .9; }
+  .queued-minus {
+    position: absolute; top: -9px; left: -9px; width: 24px; height: 24px;
+    border-radius: 50%; background: var(--err); color: #fff;
+    font-weight: bold; font-size: 16px; line-height: 24px; text-align: center;
+    cursor: pointer; box-shadow: 0 1px 4px rgba(0,0,0,.4);
+  }
   .claude { align-self: flex-start; background: var(--panel); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
   .tool, .status { align-self: flex-start; font-size: 12px; color: var(--dim); padding: 0 4px; font-family: ui-monospace, monospace; }
   .error { align-self: flex-start; color: var(--err); font-size: 13px; padding: 0 4px; }
@@ -184,10 +189,17 @@ function setNavActive(page) {
 
 let userOnSessionsPage = false; // Track if user explicitly navigated to sessions
 
+// The mic/keyboard footer only makes sense on the chat view.
+const footerEl = document.querySelector('footer');
+function setFooterVisible(on) {
+  footerEl.style.display = on ? 'flex' : 'none';
+}
+
 function showPage(page) {
   hostPicker.style.display = 'none';
   sessionPicker.style.display = 'none';
   log.style.display = 'none';
+  setFooterVisible(page === 'chat');
   setNavActive(page);
   userOnSessionsPage = (page === 'sessions');
   if (page === 'hosts') {
@@ -334,6 +346,7 @@ function showHostPicker() {
   hostPicker.style.display = 'block';
   log.style.display = 'none';
   sessionPicker.style.display = 'none';
+  setFooterVisible(false);
 }
 
 function selectHost(host) {
@@ -373,6 +386,7 @@ function startup() {
   hostPicker.style.display = 'none';
   sessionPicker.style.display = 'none';
   log.style.display = 'none';
+  setFooterVisible(false);
 
   if (isApp) {
     const hosts = loadHosts();
@@ -423,6 +437,7 @@ function showSessionPicker(sessions) {
   hostPicker.style.display = 'none';
   sessionPicker.style.display = 'block';
   log.style.display = 'none';
+  setFooterVisible(false);
 }
 
 function deleteSession(id) {
@@ -465,6 +480,7 @@ function selectSession(id) {
   }
   sessionPicker.style.display = 'none';
   log.style.display = 'flex';
+  setFooterVisible(true);
   setNavActive('chat');
 
   // Clear chat log - history will be loaded from server
@@ -492,23 +508,63 @@ function scrollLog() {
 // User messages sent while the agent is busy are queued; keep their bubbles
 // pinned at the very bottom of the chat (below the working indicator).
 let queuedEls = [];
-// The dimmed pinned bubble alone signals queueing; the only content inside
-// the note is the control to pull the message back out of the queue.
-function makeQueuedNote(el, text) {
-  const note = document.createElement('span');
-  note.className = 'queued-note';
-  const x = document.createElement('span');
-  x.className = 'queued-x';
-  x.textContent = '✕ remove';
-  x.onclick = (e) => {
-    e.stopPropagation();
-    if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'unqueue', text }));
-    queuedEls = queuedEls.filter(q => q !== el);
-    el.remove();
-  };
-  note.appendChild(x);
-  return note;
+// Queue edit mode: long-press any queued bubble to show a red minus badge on
+// every queued message; tap a badge to remove that message from the queue.
+// Long-press again or tap anywhere outside a queued bubble to exit the mode.
+let queueEditMode = false;
+function setQueueEditMode(on) {
+  queueEditMode = on;
+  for (const el of queuedEls) updateQueueBadge(el);
 }
+function updateQueueBadge(el) {
+  el.classList.toggle('q-edit', queueEditMode);
+  let badge = el.querySelector('.queued-minus');
+  if (queueEditMode && !badge) {
+    badge = document.createElement('span');
+    badge.className = 'queued-minus';
+    badge.textContent = '−';
+    badge.onclick = (e) => { e.stopPropagation(); unqueueMessage(el); };
+    el.appendChild(badge);
+  } else if (!queueEditMode && badge) {
+    badge.remove();
+  }
+}
+function unqueueMessage(el) {
+  const text = el.firstChild ? el.firstChild.nodeValue : '';
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'unqueue', text }));
+  queuedEls = queuedEls.filter(q => q !== el);
+  el.remove();
+  if (queuedEls.length === 0) setQueueEditMode(false);
+}
+// A queued bubble stops being queued (turn started, dropped, interrupted):
+// shed the dimming, badge, and edit styling in one place.
+function clearQueuedLook(el) {
+  el.classList.remove('queued', 'q-edit');
+  el.querySelector('.queued-minus')?.remove();
+}
+function markQueued(el) {
+  el.classList.add('queued');
+  let lpTimer = null, lpStart = null;
+  el.addEventListener('pointerdown', (e) => {
+    lpStart = { x: e.clientX, y: e.clientY };
+    clearTimeout(lpTimer);
+    lpTimer = setTimeout(() => { lpTimer = null; setQueueEditMode(!queueEditMode); }, 500);
+  });
+  el.addEventListener('pointermove', (e) => {
+    // A drag (scrolling the log) is not a long-press.
+    if (lpTimer && lpStart && Math.hypot(e.clientX - lpStart.x, e.clientY - lpStart.y) > 10) {
+      clearTimeout(lpTimer); lpTimer = null;
+    }
+  });
+  for (const ev of ['pointerup', 'pointercancel', 'pointerleave']) {
+    el.addEventListener(ev, () => { clearTimeout(lpTimer); lpTimer = null; });
+  }
+  el.addEventListener('contextmenu', (e) => e.preventDefault());
+  updateQueueBadge(el);
+}
+document.addEventListener('click', (e) => {
+  if (queueEditMode && !e.target.closest('.msg.queued')) setQueueEditMode(false);
+});
 function pinBottomEls() {
   if (workingEl && workingEl.parentNode === log) log.appendChild(workingEl);
   for (const el of queuedEls) log.appendChild(el);
@@ -609,10 +665,7 @@ function connect() {
       if (m.busy) {
         agentBusy = true; showWorking(); micBtn.classList.add('busy');
       } else {
-        for (const el of queuedEls) {
-          el.classList.remove('queued');
-          el.querySelector('.queued-note')?.remove();
-        }
+        for (const el of queuedEls) clearQueuedLook(el);
         queuedEls = [];
         agentBusy = false; hideWorking(); micBtn.classList.remove('busy');
       }
@@ -641,6 +694,7 @@ function connect() {
             hostPicker.style.display = 'none';
             sessionPicker.style.display = 'none';
             log.style.display = 'flex';
+            setFooterVisible(true);
             scrollLog();
             setNavActive('chat');
             // Allow history to load if log is empty (e.g., after page refresh)
@@ -674,6 +728,7 @@ function connect() {
         hostPicker.style.display = 'none';
         sessionPicker.style.display = 'none';
         log.style.display = 'flex';
+        setFooterVisible(true);
         scrollLog();
       }
     }
@@ -720,8 +775,7 @@ function connect() {
         }
         for (const q of queued) {
           const el = add('user', q);
-          el.classList.add('queued');
-          el.appendChild(makeQueuedNote(el, q));
+          markQueued(el);
           queuedEls.push(el);
         }
         if (queued.length > 0) { agentBusy = true; micBtn.classList.add('busy'); }
@@ -741,8 +795,7 @@ function connect() {
       const i = queuedEls.findIndex(el => el.firstChild && el.firstChild.nodeValue === m.text);
       if (i !== -1) {
         const el = queuedEls.splice(i, 1)[0];
-        el.classList.remove('queued');
-        el.querySelector('.queued-note')?.remove();
+        clearQueuedLook(el);
       }
       if (!m.busy) { agentBusy = false; hideWorking(); micBtn.classList.remove('busy'); setState('idle'); }
     }
@@ -775,8 +828,7 @@ function connect() {
         // (it stays at the bottom, the new turn's messages follow it) and
         // stay in the busy state.
         const next = queuedEls.shift();
-        next.classList.remove('queued');
-        next.querySelector('.queued-note')?.remove();
+        clearQueuedLook(next);
       } else {
         agentBusy = false; hideWorking(); setState('idle'); micBtn.classList.remove('busy');
       }
@@ -810,10 +862,9 @@ function sendUser(text) {
   const el = add('user', text);
   ws.send(JSON.stringify({ type: 'user', text }));
   if (agentBusy) {
-    // Agent is mid-turn: this message is queued — dim it, pin it at the
-    // bottom, and label it inside the bubble.
-    el.classList.add('queued');
-    el.appendChild(makeQueuedNote(el, text));
+    // Agent is mid-turn: this message is queued — dim it and pin it at the
+    // bottom.
+    markQueued(el);
     queuedEls.push(el);
     pinBottomEls();
     scrollLog();
@@ -1348,10 +1399,7 @@ stopBtn.onclick = () => {
   if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'interrupt' }));
   // Interrupt also discards queued messages agent-side; reflect that here so
   // stale "queued" bubbles don't linger claiming they're still waiting.
-  for (const el of queuedEls) {
-    el.classList.remove('queued');
-    el.querySelector('.queued-note')?.remove();
-  }
+  for (const el of queuedEls) clearQueuedLook(el);
   queuedEls = [];
   agentBusy = false;
   hideWorking();
