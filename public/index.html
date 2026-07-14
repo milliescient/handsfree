@@ -603,8 +603,10 @@ function connect() {
       // Server sent conversation history for resumed session
       const count = m.messages?.length || 0;
       console.log('Received history:', count, 'messages');
-      // Debug alert disabled
-      // alert('Got ' + count + ' history messages');
+      // Send debug to server so we can see it in logs
+      if (ws && ws.readyState === 1) {
+        ws.send(JSON.stringify({ type: 'debug', msg: 'Client received history: ' + count + ' messages' }));
+      }
       // Load history if we have messages
       if (m.messages && m.messages.length > 0) {
         // Clear log and add messages
