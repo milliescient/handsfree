@@ -120,7 +120,10 @@ echo
 echo "=== Setup Complete ==="
 echo
 echo "Start everything (web server + agent daemon, supervised):"
-echo "  ./run.sh /path/to/your/project"
+echo "  ./run.sh"
+echo
+echo "Each session picks its working directory in the app (default: your"
+echo "home directory; pass a path to run.sh to change the default)."
 echo
 echo "Then open the printed https:// URL on your phone or browser."
 echo

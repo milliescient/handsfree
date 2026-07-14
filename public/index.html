@@ -97,6 +97,9 @@
   .session-btn .time { color: var(--dim); font-size: 11px; }
   .session-btn.new { border-color: var(--ok); color: var(--ok); }
   .session-btn .delete { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); color: var(--err); font-size: 24px; padding: 12px; min-width: 44px; min-height: 44px; display: flex; align-items: center; justify-content: center; }
+  .session-btn .dir { color: var(--dim); font-size: 11px; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #sessionPicker input { width: 100%; background: var(--panel); border: 1px solid var(--border); color: var(--text); border-radius: 10px; padding: 12px 16px; font-size: 16px; margin-bottom: 8px; outline: none; }
+  #sessionPicker input:focus { border-color: var(--accent); }
   .host-btn { width: 100%; text-align: left; background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 10px; padding: 12px 16px; margin-bottom: 8px; cursor: pointer; }
   .host-btn:hover { border-color: var(--accent); }
   .host-btn .url { color: var(--dim); font-size: 13px; margin-top: 4px; word-break: break-all; }
@@ -173,6 +176,8 @@ let interimEl = null;
 let transcribeTimers = [];
 let sessionChosen = false;
 let currentSessionId = localStorage.getItem('handsfree_session') || null; // Persist across reloads
+let currentCwd = null; // Working directory of the chosen session
+let defaultWorkdir = ''; // Server default for new sessions (from hello)
 let cachedSessions = []; // Store sessions from server
 const sessionPicker = document.getElementById('sessionPicker');
 const sessionList = document.getElementById('sessionList');
@@ -428,11 +433,22 @@ function startup() {
 function showSessionPicker(sessions) {
   sessionList.innerHTML = '';
 
-  // New session button
+  // New session: working directory input (prefilled with the last-used
+  // directory or the server default) above the start button.
+  const dirInput = document.createElement('input');
+  dirInput.placeholder = 'working directory for new session';
+  dirInput.autocomplete = 'off';
+  dirInput.value = localStorage.getItem('handsfree_workdir') || defaultWorkdir || '~';
+  sessionList.appendChild(dirInput);
+
   const newBtn = document.createElement('button');
   newBtn.className = 'session-btn new';
   newBtn.textContent = '+ Start new session';
-  newBtn.onclick = () => selectSession(null);
+  newBtn.onclick = () => {
+    const dir = dirInput.value.trim();
+    if (dir) localStorage.setItem('handsfree_workdir', dir);
+    selectSession(null, dir || null);
+  };
   sessionList.appendChild(newBtn);
 
   // Existing sessions
@@ -440,7 +456,8 @@ function showSessionPicker(sessions) {
     const btn = document.createElement('button');
     btn.className = 'session-btn';
     const time = new Date(s.lastUsed).toLocaleString();
-    btn.innerHTML = `<span class="delete" data-id="${s.id}">×</span><div class="time">${time}</div><div class="preview">${s.preview || '(no preview)'}</div>`;
+    const dir = s.cwd ? `<div class="dir">${s.cwd}</div>` : '';
+    btn.innerHTML = `<span class="delete" data-id="${s.id}">×</span><div class="time">${time}</div><div class="preview">${s.preview || '(no preview)'}</div>${dir}`;
     btn.onclick = (e) => {
       if (e.target.classList.contains('delete')) {
         e.stopPropagation();
@@ -477,7 +494,7 @@ function deleteSession(id) {
 
 let lastSelectedSession = null; // Prevent duplicate selections
 
-function selectSession(id) {
+function selectSession(id, cwd) {
   // Debug: send to server
   if (ws && ws.readyState === 1) {
     ws.send(JSON.stringify({ type: 'debug', msg: 'selectSession called: id=' + id + ' lastSelected=' + lastSelectedSession + ' children=' + log.children.length }));
@@ -490,6 +507,10 @@ function selectSession(id) {
   lastSelectedSession = id;
   sessionChosen = true;
   currentSessionId = id;
+  // Resumed sessions keep the directory they were started in; new sessions
+  // use the one just chosen (falling back to the server default).
+  currentCwd = id ? (cachedSessions.find(s => s.id === id)?.cwd || null) : (cwd || null);
+  workdirEl.textContent = currentCwd || defaultWorkdir;
   // Persist to localStorage so we can resume after navigating away
   if (id) {
     localStorage.setItem('handsfree_session', id);
@@ -505,12 +526,12 @@ function selectSession(id) {
   log.innerHTML = '';
 
   if (!id) {
-    add('status', 'Started new session');
+    add('status', 'Started new session in ' + (currentCwd || defaultWorkdir));
   }
 
   if (ws && ws.readyState === 1) {
-    console.log('Sending session selection to server:', id);
-    ws.send(JSON.stringify({ type: 'session', id }));
+    console.log('Sending session selection to server:', id, 'cwd:', currentCwd);
+    ws.send(JSON.stringify({ type: 'session', id, cwd: currentCwd }));
   } else {
     console.log('WebSocket not ready, cannot send session:', ws?.readyState);
   }
@@ -703,7 +724,8 @@ function connect() {
   ws.onmessage = (ev) => {
     const m = JSON.parse(ev.data);
     if (m.type === 'hello') {
-      workdirEl.textContent = m.workdir;
+      defaultWorkdir = m.workdir;
+      workdirEl.textContent = currentCwd || m.workdir;
       // A turn may still be running in agentd from before we (re)connected —
       // set busy so progress updates are rendered and spoken. And if the
       // agent is idle, drop any stale busy state left over from a message
@@ -766,6 +788,11 @@ function connect() {
         setNavActive('sessions');
       } else {
         console.log('Session already chosen, showing chat');
+        // A fresh server connection has no session state; re-assert the
+        // new-session choice (and its directory) or messages get rejected.
+        if (!currentSessionId && ws && ws.readyState === 1) {
+          ws.send(JSON.stringify({ type: 'session', id: null, cwd: currentCwd }));
+        }
         setNavActive('chat');
         hostPicker.style.display = 'none';
         sessionPicker.style.display = 'none';
@@ -899,6 +926,7 @@ function connect() {
         // If this was a new session, save the ID (first in list is most recent)
         if (!currentSessionId && cachedSessions.length > 0) {
           currentSessionId = cachedSessions[0].id;
+          currentCwd = cachedSessions[0].cwd || currentCwd;
           localStorage.setItem('handsfree_session', currentSessionId);
           console.log('Saved new session ID:', currentSessionId);
         }

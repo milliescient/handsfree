@@ -5,7 +5,7 @@
 import { createServer } from 'node:https';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { networkInterfaces } from 'node:os';
+import { networkInterfaces, homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -39,7 +39,15 @@ process.on('unhandledRejection', (err) => {
 });
 
 const PORT = Number(process.env.PORT || 8443);
-const WORKDIR = path.resolve(process.argv[2] || process.env.WORKDIR || process.cwd());
+// Default working directory for new sessions only — each session remembers
+// the directory it was started in (stored in the sessions registry).
+const WORKDIR = path.resolve(process.argv[2] || process.env.WORKDIR || homedir());
+
+// Expand a leading ~ and resolve a client-supplied directory.
+function expandDir(dir) {
+  if (!dir) return null;
+  return path.resolve(dir.replace(/^~(?=$|\/)/, homedir()));
+}
 
 // App version - uses git SHA, computed at startup
 const APP_VERSION = (() => {
@@ -253,7 +261,11 @@ function saveSessions(sessions) {
 // exactly like it did when the app was closed.
 function loadSessionHistory(sessionId, maxMessages = 200) {
   const homeDir = process.env.HOME || process.env.USERPROFILE;
-  const projectPath = WORKDIR.replace(/\//g, '-');
+  // SDK session files live under a per-directory project path, so use the
+  // directory this session was started in, not the server default.
+  const session = loadSessions().find(s => s.id === sessionId);
+  const cwd = (session && session.cwd) || WORKDIR;
+  const projectPath = cwd.replace(/\//g, '-');
   const sessionFile = path.join(homeDir, '.claude', 'projects', projectPath, `${sessionId}.jsonl`);
 
   const messages = [];
@@ -490,7 +502,7 @@ wss.on('connection', (ws, req) => {
   console.log(`New WebSocket connection from ${req.socket.remoteAddress} UA=${req.headers['user-agent'] || 'unknown'}`);
   const send = (obj) => { if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(obj)); };
   const connId = nextConnId++;
-  const conn = { sessionId: null, sessionChosen: false, send };
+  const conn = { sessionId: null, sessionChosen: false, cwd: null, send };
   conns.set(connId, conn);
 
   // Heartbeat to keep connection alive
@@ -519,6 +531,17 @@ wss.on('connection', (ws, req) => {
       // Client wants to resume a specific session or start fresh (null)
       conn.sessionId = msg.id || null;
       conn.sessionChosen = true;
+      // For new sessions the client may pick a working directory; validate it
+      // here so a typo'd path fails loudly instead of confusing the SDK.
+      conn.cwd = null;
+      if (!conn.sessionId && msg.cwd) {
+        const dir = expandDir(msg.cwd);
+        if (existsSync(dir)) {
+          conn.cwd = dir;
+        } else {
+          send({ type: 'status', text: `Directory not found: ${dir} — using ${WORKDIR}` });
+        }
+      }
       if (conn.sessionId) {
         console.log('Client selected session:', conn.sessionId);
         // Always send history on explicit selection: the client clears its
@@ -572,7 +595,7 @@ wss.on('connection', (ws, req) => {
       if (!agentWs || agentWs.readyState !== WebSocket.OPEN) {
         send({ type: 'status', text: 'agent is restarting — your message is queued' });
       }
-      sendToAgent({ type: 'user', text, sessionId: conn.sessionId, connId });
+      sendToAgent({ type: 'user', text, sessionId: conn.sessionId, cwd: conn.cwd, connId });
     } else if (msg.type === 'vad_debug') {
       // Log VAD debug info for analyzing false triggers
       console.log(`[VAD] energy=${msg.energy.toFixed(4)} max=${msg.maxSample.toFixed(4)} samples=${msg.samples} playback=${msg.duringPlayback}`);

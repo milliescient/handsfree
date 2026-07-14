@@ -14,8 +14,12 @@ app is the only thing that compiles).
 
 ```bash
 ./setup.sh                    # install dependencies, check configuration
-./run.sh /path/to/your/project
+./run.sh
 ```
+
+Each session has its own working directory, chosen in the app when you start
+a new session (defaults to your home directory). Passing a path to `run.sh`
+just changes that default.
 
 The server prints URLs like:
 
@@ -94,7 +98,7 @@ the APK on the phone; server changes take effect immediately.
 
 | What | How |
 | --- | --- |
-| Working directory | first CLI arg to `run.sh`/`server.js`, or `WORKDIR` env var (default: cwd) |
+| Default working directory for new sessions | first CLI arg to `run.sh`, or `WORKDIR` env var (default: home directory); each session remembers its own |
 | Port | `PORT` env var (default 8443) |
 | Local Whisper | `WHISPER_URL` env var (default `http://127.0.0.1:9876/transcribe`) |
 | Local TTS | `TTS_URL` env var (default `http://127.0.0.1:9877/synthesize`) |

@@ -8,6 +8,7 @@
 // now, losing the in-flight turn.
 
 import { readFileSync, writeFileSync, existsSync, unlinkSync } from 'node:fs';
+import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
@@ -24,7 +25,9 @@ try {
 } catch {}
 
 const PORT = Number(process.env.AGENTD_PORT || 9878);
-const WORKDIR = path.resolve(process.argv[2] || process.env.WORKDIR || process.cwd());
+// Default working directory for new sessions only — each session remembers
+// the directory it was started in (stored in the sessions registry).
+const WORKDIR = path.resolve(process.argv[2] || process.env.WORKDIR || homedir());
 const SESSIONS_FILE = path.join(__dirname, '.sessions.json');
 const PID_FILE = path.join(__dirname, '.agentd.pid');
 
@@ -65,15 +68,16 @@ function saveSessions(sessions) {
   try { writeFileSync(SESSIONS_FILE, JSON.stringify(sessions, null, 2)); } catch {}
 }
 
-function addOrUpdateSession(id, preview = '', lastResponse = '') {
+function addOrUpdateSession(id, preview = '', lastResponse = '', cwd = '') {
   const sessions = loadSessions();
   const existing = sessions.find(s => s.id === id);
   if (existing) {
     existing.lastUsed = Date.now();
     if (preview) existing.preview = preview.slice(0, 300);
     if (lastResponse) existing.lastResponse = lastResponse.slice(0, 500);
+    if (cwd && !existing.cwd) existing.cwd = cwd;
   } else {
-    sessions.unshift({ id, lastUsed: Date.now(), preview: preview.slice(0, 300), lastResponse: lastResponse.slice(0, 500) });
+    sessions.unshift({ id, lastUsed: Date.now(), preview: preview.slice(0, 300), lastResponse: lastResponse.slice(0, 500), cwd });
   }
   saveSessions(sessions.slice(0, 20));
 }
@@ -200,11 +204,15 @@ async function runTurn(job) {
   let lastAssistantText = '';
   let sessionId = job.sessionId || null;
   const requested = sessionId;
-  console.log(`runTurn: connId=${job.connId} resume=${requested || 'new session'} text="${job.text.slice(0, 60)}"`);
+  // Resumed sessions run in the directory they were started in; new sessions
+  // use the directory the client chose, falling back to the server default.
+  const saved = sessionId ? loadSessions().find(s => s.id === sessionId) : null;
+  const cwd = (saved && saved.cwd) || job.cwd || WORKDIR;
+  console.log(`runTurn: connId=${job.connId} resume=${requested || 'new session'} cwd=${cwd} text="${job.text.slice(0, 60)}"`);
   active = query({
     prompt: job.text,
     options: {
-      cwd: WORKDIR,
+      cwd,
       model: 'claude-fable-5',
       ...(sessionId ? { resume: sessionId } : {}),
       permissionMode: 'bypassPermissions',
@@ -219,7 +227,7 @@ async function runTurn(job) {
           console.warn(`Session mismatch! Requested ${requested} but got ${m.session_id}`);
         }
         sessionId = m.session_id;
-        addOrUpdateSession(sessionId, job.text);
+        addOrUpdateSession(sessionId, job.text, '', cwd);
         emit({ type: 'sessionStarted', sessionId, connId: job.connId });
       } else if (m.type === 'assistant') {
         const blocks = m.message?.content ?? m.content ?? [];
@@ -289,7 +297,7 @@ wss.on('connection', (ws) => {
         emit({ type: 'dropped', text: msg.text.trim(), connId: msg.connId, busy: !!active });
         return;
       }
-      const job = { text: msg.text.trim(), sessionId: msg.sessionId || null, connId: msg.connId };
+      const job = { text: msg.text.trim(), sessionId: msg.sessionId || null, cwd: msg.cwd || null, connId: msg.connId };
       if (active) {
         queue.push(job);
         // Log arrivals: without this the queue is invisible in the log until
@@ -330,5 +338,5 @@ wss.on('connection', (ws) => {
 });
 
 console.log(`agentd — Claude turn runner`);
-console.log(`Working directory for the agent: ${WORKDIR}`);
+console.log(`Default working directory for new sessions: ${WORKDIR}`);
 console.log(`Listening on ws://127.0.0.1:${PORT} (pid ${process.pid})`);
