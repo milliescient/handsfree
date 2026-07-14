@@ -569,6 +569,9 @@ document.addEventListener('click', (e) => {
 function pinBottomEls() {
   if (workingEl && workingEl.parentNode === log) log.appendChild(workingEl);
   for (const el of queuedEls) log.appendChild(el);
+  // Live listening/transcribing indicator sits at the very bottom: it is the
+  // user's in-flight speech, which becomes the newest bubble.
+  if (interimEl && interimEl.parentNode === log) log.appendChild(interimEl);
 }
 
 function add(cls, text) {
@@ -946,7 +949,7 @@ async function initVAD() {
         // waits for a few confirmed loud frames (onFrameProcessed below).
         console.log('onSpeechStart fired, tts.speaking=' + tts.speaking);
         if (tts.speaking) tts.duck(true);
-        if (!interimEl) interimEl = add('interim', '');
+        if (!interimEl) { interimEl = add('interim', ''); pinBottomEls(); }
         interimEl.textContent = '… listening...';
       },
       // Early barge-in: stop playback after ~4 consecutive frames (~130ms) of
@@ -1020,7 +1023,7 @@ async function initVAD() {
         listening = false;
         micBtn.classList.remove('listening');
         setState('transcribing');
-        if (!interimEl) interimEl = add('interim', '');
+        if (!interimEl) { interimEl = add('interim', ''); pinBottomEls(); }
         interimEl.textContent = '… transcribing...';
 
         // Timeout: if no response in 30s, reset state
