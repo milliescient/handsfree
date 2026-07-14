@@ -355,6 +355,10 @@ wss.on('connection', (ws) => {
   let sessionId = null; // Will be set by client via 'session' message or on first turn
   let sessionChosen = false; // Track whether user has explicitly chosen a session
 
+  // Heartbeat to keep connection alive
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
+
   ws.on('error', (err) => {
     console.error('WebSocket error:', err.message);
   });
@@ -489,6 +493,14 @@ wss.on('connection', (ws) => {
     } else if (msg.type === 'vad_debug') {
       // Log VAD debug info for analyzing false triggers
       console.log(`[VAD] energy=${msg.energy.toFixed(4)} max=${msg.maxSample.toFixed(4)} samples=${msg.samples} playback=${msg.duringPlayback}`);
+    } else if (msg.type === 'vad_rejected') {
+      // Log when VAD rejected audio as too quiet
+      console.log(`[VAD REJECTED] energy=${msg.energy.toFixed(4)} threshold=${msg.threshold} playback=${msg.duringPlayback}`);
+    } else if (msg.type === 'barge_in') {
+      // Log when barge-in is triggered
+      console.log(`[BARGE-IN] energy=${msg.energy.toFixed(4)} playback=${msg.duringPlayback}`);
+    } else if (msg.type === 'debug') {
+      console.log(`[DEBUG] ${msg.msg}`);
     } else if (msg.type === 'transcribe' && msg.audio) {
       // Handle transcription over WebSocket (for Android where fetch to self-signed cert fails)
       console.log('Received transcribe request, audio length:', msg.audio.length);
@@ -531,6 +543,19 @@ wss.on('connection', (ws) => {
 });
 
 // ---------------------------------------------------------------------------
+// Heartbeat interval to detect and close dead connections
+const HEARTBEAT_INTERVAL = 30000; // 30 seconds
+setInterval(() => {
+  wss.clients.forEach((ws) => {
+    if (ws.isAlive === false) {
+      console.log('Terminating dead WebSocket connection');
+      return ws.terminate();
+    }
+    ws.isAlive = false;
+    ws.ping();
+  });
+}, HEARTBEAT_INTERVAL);
+
 server.listen(PORT, () => {
   console.log(`\nhandsfree — voice interface for Claude Code`);
   console.log(`Working directory for the agent: ${WORKDIR}\n`);

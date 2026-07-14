@@ -7,3 +7,4 @@ certs/
 .usage.json
 android/app/build/
 public/handsfree.apk
+.run.lock

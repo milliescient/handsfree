@@ -192,7 +192,7 @@ let serverHost = location.host;
 const isApp = !location.host || location.protocol === 'file:' || location.host === 'localhost' || !!(window.Capacitor || window.AudioBridge);
 
 // App version - git SHA, set by build-apk.sh
-const APP_VERSION = 'b1328cd';
+const APP_VERSION = '6b23e22';
 const CODE_VERSION = 'v2-delayed-bargein'; // Change this when updating VAD logic
 console.log('Code version:', CODE_VERSION);
 
@@ -708,12 +708,13 @@ async function initVAD() {
     }
 
     myvad = await vad.MicVAD.new({
-      positiveSpeechThreshold: 0.95,  // Higher = less sensitive (default 0.5)
-      negativeSpeechThreshold: 0.5,   // Higher = needs clearer silence to stop (default 0.35)
-      minSpeechFrames: 10,            // Require more frames before triggering (default 3)
+      positiveSpeechThreshold: 0.7,   // Lower = more sensitive (default 0.5)
+      negativeSpeechThreshold: 0.35,  // Default value
+      minSpeechFrames: 5,             // Fewer frames needed to trigger (default 3)
       onSpeechStart: () => {
         // Don't stop audio yet - wait for onSpeechEnd to confirm it's real speech
         // Just show a subtle indicator
+        console.log('onSpeechStart fired, audioPlaying=' + audioPlaying);
         if (!interimEl) interimEl = add('interim', '');
         interimEl.textContent = '… listening...';
       },
@@ -742,15 +743,23 @@ async function initVAD() {
         }
 
         // Use higher threshold during playback to prevent false barge-ins
-        const threshold = duringPlayback ? 0.15 : 0.05;
+        const threshold = duringPlayback ? 0.03 : 0.01;
         if (energy < threshold) {
-          console.log('Audio too quiet, ignoring (threshold:', threshold, ')');
+          console.log('Audio too quiet, ignoring (threshold:', threshold, ') energy:', energy.toFixed(4));
+          // Send rejection to server for debugging
+          if (ws && ws.readyState === 1) {
+            ws.send(JSON.stringify({ type: 'vad_rejected', energy: energy, threshold: threshold, duringPlayback: duringPlayback }));
+          }
           if (interimEl) { interimEl.remove(); interimEl = null; }
           if (handsFree && !agentBusy) setTimeout(startListening, 200);
           return;
         }
 
         // Now we know it's real speech - do barge-in
+        console.log('BARGE-IN triggered, stopping audio, duringPlayback=' + duringPlayback);
+        if (ws && ws.readyState === 1) {
+          ws.send(JSON.stringify({ type: 'barge_in', energy: energy, duringPlayback: duringPlayback }));
+        }
         stopServerAudio();
         if (ttsSpeaking || ttsQueue.length > 0) {
           if (hasNativeTTS()) {
@@ -762,6 +771,8 @@ async function initVAD() {
           ttsSpeaking = false;
         }
 
+        // Pause VAD while transcribing - will restart during playback for barge-in
+        if (myvad) myvad.pause();
         listening = false;
         micBtn.classList.remove('listening');
         setState('transcribing');
@@ -829,10 +840,14 @@ async function startListening() {
   }
 
   if (myvad) {
+    console.log('VAD starting, current state:', myvad.listening);
     myvad.start();
     listening = true;
     micBtn.classList.add('listening');
     setState('listening');
+    console.log('VAD started successfully');
+  } else {
+    console.log('VAD not available!');
   }
 }
 
@@ -875,7 +890,17 @@ function playNextAudio() {
   setState(agentBusy ? 'working' : 'speaking');
 
   // Start VAD during playback for barge-in detection
-  if (handsFree && !listening) startListening();
+  console.log('playNextAudio: handsFree=' + handsFree + ' listening=' + listening);
+  if (ws && ws.readyState === 1) {
+    ws.send(JSON.stringify({ type: 'debug', msg: 'playNextAudio handsFree=' + handsFree + ' listening=' + listening }));
+  }
+  if (handsFree && !listening) {
+    console.log('Starting VAD for barge-in detection');
+    if (ws && ws.readyState === 1) {
+      ws.send(JSON.stringify({ type: 'debug', msg: 'Starting VAD for barge-in' }));
+    }
+    startListening();
+  }
 
   try {
     currentAudio = new Audio('data:audio/wav;base64,' + item.audio);
@@ -973,7 +998,15 @@ function speakNext() {
   const clean = ttsQueue.shift();
   setState(agentBusy ? 'working' : 'speaking');
   // Start VAD during TTS for barge-in detection
-  if (handsFree && !listening) startListening();
+  if (ws && ws.readyState === 1) {
+    ws.send(JSON.stringify({ type: 'debug', msg: 'speakNext: handsFree=' + handsFree + ' listening=' + listening }));
+  }
+  if (handsFree && !listening) {
+    if (ws && ws.readyState === 1) {
+      ws.send(JSON.stringify({ type: 'debug', msg: 'Starting VAD for TTS barge-in' }));
+    }
+    startListening();
+  }
 
   if (hasNativeTTS()) {
     // Use native Android TTS
