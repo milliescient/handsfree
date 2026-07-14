@@ -1134,31 +1134,42 @@ const tts = {
     }
   },
 
-  // Play server-generated audio (WAV)
+  // Tell the server when playback falls back to device TTS, so the reason
+  // shows up in the server log instead of dying in the WebView console.
+  reportAudioError(stage, err) {
+    const detail = err?.message || this.currentAudio?.error?.message || String(err || 'unknown');
+    console.error('Server audio ' + stage + ':', detail);
+    if (ws && ws.readyState === 1) {
+      ws.send(JSON.stringify({ type: 'debug', msg: `[AUDIO-FALLBACK] ${stage}: ${detail}` }));
+    }
+  },
+
+  // Play server-generated audio (WAV). A blob URL is used instead of a
+  // data: URI — multi-megabyte data URIs fail in Android WebViews, which
+  // silently downgraded everything to native TTS.
   playServerAudio(item) {
+    let url = null;
+    const fallback = (stage, e) => {
+      this.reportAudioError(stage, e);
+      if (url) URL.revokeObjectURL(url);
+      this.currentAudio = null;
+      this.speakText(item.text);
+    };
     try {
-      this.currentAudio = new Audio('data:audio/wav;base64,' + item.audio);
+      const bytes = Uint8Array.from(atob(item.audio), c => c.charCodeAt(0));
+      url = URL.createObjectURL(new Blob([bytes], { type: 'audio/wav' }));
+      this.currentAudio = new Audio(url);
       this.currentAudio.volume = this.ducked ? 0.15 : 1.0;
       this.currentAudio.onended = () => {
         console.log('Server audio ended');
+        URL.revokeObjectURL(url);
         this.currentAudio = null;
         this.playNext();
       };
-      this.currentAudio.onerror = (e) => {
-        console.error('Server audio error:', e);
-        this.currentAudio = null;
-        // Fall back to TTS
-        this.speakText(item.text);
-      };
-      this.currentAudio.play().catch(e => {
-        console.error('Server audio play failed:', e);
-        this.currentAudio = null;
-        this.speakText(item.text);
-      });
+      this.currentAudio.onerror = (e) => fallback('element error', e);
+      this.currentAudio.play().catch(e => fallback('play() rejected', e));
     } catch (e) {
-      console.error('Server audio creation failed:', e);
-      this.currentAudio = null;
-      this.speakText(item.text);
+      fallback('creation failed', e);
     }
   },
 
