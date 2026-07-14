@@ -31,7 +31,6 @@
     background: var(--panel); color: var(--text); border: 1px solid var(--border);
     border-radius: 8px; padding: 6px 12px; font-size: 13px;
   }
-  #autoBtn.on { border-color: var(--accent); color: var(--accent); }
 
   #log { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
   .msg { max-width: 88%; padding: 10px 14px; border-radius: 14px; white-space: pre-wrap; word-break: break-word; }
@@ -48,16 +47,27 @@
   }
 
   footer { padding: 10px 16px 14px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 10px; }
-  #controls { display: flex; align-items: center; justify-content: center; gap: 18px; }
+  #controls { position: relative; display: flex; align-items: center; justify-content: center; gap: 18px; }
   #mic {
     width: 78px; height: 78px; border-radius: 50%; border: none;
     background: var(--accent); color: #fff; font-size: 32px;
     box-shadow: 0 4px 18px rgba(217, 119, 87, .35);
     transition: transform .15s;
+    touch-action: none; user-select: none; -webkit-user-select: none;
   }
   #mic:active { transform: scale(.94); }
   #mic.listening { animation: pulse 1.2s infinite; }
   #mic.busy { background: var(--panel); border: 2px solid var(--accent); }
+  #mic.locked { background: var(--panel); border: 2px solid var(--accent); color: var(--accent); }
+  #lockHint {
+    position: absolute; left: 50%; bottom: 100px; transform: translateX(-50%);
+    width: 48px; height: 48px; border-radius: 50%; z-index: 5;
+    background: var(--panel); border: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: center; font-size: 22px;
+    opacity: 0; pointer-events: none; transition: opacity .15s, transform .15s, border-color .15s;
+  }
+  #lockHint.show { opacity: 1; }
+  #lockHint.near { border-color: var(--accent); transform: translateX(-50%) scale(1.2); }
   @keyframes pulse {
     0%, 100% { box-shadow: 0 0 0 0 rgba(217, 119, 87, .5); }
     50% { box-shadow: 0 0 0 16px rgba(217, 119, 87, 0); }
@@ -66,7 +76,6 @@
     width: 52px; height: 52px; border-radius: 50%; font-size: 18px;
     background: var(--panel); color: var(--err); border: 1px solid var(--border);
   }
-  #state { width: 52px; text-align: center; font-size: 11px; color: var(--dim); }
   #textRow { display: flex; gap: 8px; }
   #textInput {
     flex: 1; background: var(--panel); border: 1px solid var(--border); color: var(--text);
@@ -97,7 +106,6 @@
   <div id="dot"></div>
   <div id="workdir">connecting…</div>
   <a id="apkBtn" href="handsfree.apk" download style="display:none;background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 12px;font-size:13px;text-decoration:none;">📱 APK</a>
-  <button id="autoBtn" title="Auto-listen after Claude speaks">🎧 hands-free</button>
 </header>
 
 <nav id="navbar">
@@ -126,8 +134,8 @@
 
 <footer>
   <div id="controls">
-    <div id="state">idle</div>
-    <button id="mic" title="Tap to talk"></button>
+    <div id="lockHint">🔓</div>
+    <button id="mic" title="Hold to talk, slide up to lock hands-free"></button>
     <button id="stop" title="Interrupt">■</button>
   </div>
   <div id="textRow">
@@ -142,8 +150,7 @@ const dot = document.getElementById('dot');
 const workdirEl = document.getElementById('workdir');
 const micBtn = document.getElementById('mic');
 const stopBtn = document.getElementById('stop');
-const autoBtn = document.getElementById('autoBtn');
-const stateEl = document.getElementById('state');
+const lockHint = document.getElementById('lockHint');
 const textInput = document.getElementById('textInput');
 
 let ws = null;
@@ -483,7 +490,9 @@ function add(cls, text) {
   return el;
 }
 
-function setState(s) { stateEl.textContent = s; }
+// The old text state label next to the mic is gone; the mic button itself
+// carries the state (pulse = listening, outline = busy, lock = hands-free).
+function setState(s) {}
 
 // In-chat working indicator with rotating whimsical words (à la Claude Code)
 const WORKING_WORDS = ['Cogitating', 'Percolating', 'Ruminating', 'Noodling', 'Mulling', 'Pondering',
@@ -768,6 +777,7 @@ async function initVAD() {
       positiveSpeechThreshold: 0.7,   // Lower = more sensitive (default 0.5)
       negativeSpeechThreshold: 0.35,  // Default value
       minSpeechFrames: 5,             // Fewer frames needed to trigger (default 3)
+      submitUserSpeechOnPause: true,  // Push-to-talk: releasing mid-speech still submits
       onSpeechStart: () => {
         // Don't stop audio yet - wait for onSpeechEnd to confirm it's real speech
         // Just show a subtle indicator
@@ -1134,37 +1144,66 @@ function speak(text) { tts.speakFull(text); }
 function speakBrief(text) { tts.speakBrief(text); }
 
 // ---------------- Controls ----------------
-micBtn.onclick = () => { unlockTTS(); listening ? stopListening() : startListening(); };
+// Mic gestures: hold to talk (release stops), slide up to the lock to engage
+// hands-free mode, tap while locked to disengage.
+function setHandsFree(on) {
+  handsFree = on;
+  micBtn.classList.toggle('locked', on);
+  micBtn.textContent = on ? '🔒' : '';
+  // Android foreground service keeps the mic alive in the background
+  try {
+    if (on && window.AudioBridge?.startAudioService) window.AudioBridge.startAudioService();
+    if (!on && window.AudioBridge?.stopAudioService) window.AudioBridge.stopAudioService();
+  } catch (e) { console.log('AudioBridge not available:', e); }
+  if (on) { if (!listening) startListening(); }
+  else stopListening();
+}
+
+const LOCK_DIST = 70; // px to slide up before hands-free locks
+let micHold = null;   // { startY, startT, wasListening } while pointer is down
+
+micBtn.addEventListener('pointerdown', (e) => {
+  e.preventDefault();
+  unlockTTS();
+  if (handsFree) { setHandsFree(false); return; } // tap unlocks hands-free
+  micHold = { startY: e.clientY, startT: Date.now(), wasListening: listening };
+  try { micBtn.setPointerCapture(e.pointerId); } catch {}
+  lockHint.classList.add('show');
+  if (!listening) startListening();
+});
+
+micBtn.addEventListener('pointermove', (e) => {
+  if (!micHold) return;
+  const dy = micHold.startY - e.clientY;
+  lockHint.classList.toggle('near', dy > LOCK_DIST * 0.5);
+  if (dy > LOCK_DIST) {
+    micHold = null;
+    lockHint.classList.remove('show', 'near');
+    setHandsFree(true);
+  }
+});
+
+function micRelease() {
+  if (!micHold) return;
+  const { startT, wasListening } = micHold;
+  micHold = null;
+  lockHint.classList.remove('show', 'near');
+  const quickTap = Date.now() - startT < 300;
+  // Quick tap toggles listening; a real hold is push-to-talk, release stops.
+  if (quickTap) { if (wasListening) stopListening(); }
+  else stopListening();
+}
+micBtn.addEventListener('pointerup', micRelease);
+micBtn.addEventListener('pointercancel', micRelease);
 
 stopBtn.onclick = () => {
   tts.stop();
+  if (handsFree) setHandsFree(false);
   stopListening();
   if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'interrupt' }));
   agentBusy = false;
   micBtn.classList.remove('busy');
   setState('idle');
-};
-
-autoBtn.onclick = () => {
-  unlockTTS();
-  handsFree = !handsFree;
-  autoBtn.classList.toggle('on', handsFree);
-  if (handsFree) {
-    // Start Android foreground service if available (keeps mic alive in background)
-    try {
-      if (window.AudioBridge && typeof window.AudioBridge.startAudioService === 'function') {
-        window.AudioBridge.startAudioService();
-      }
-    } catch (e) { console.log('AudioBridge not available:', e); }
-    startListening();
-  } else {
-    try {
-      if (window.AudioBridge && typeof window.AudioBridge.stopAudioService === 'function') {
-        window.AudioBridge.stopAudioService();
-      }
-    } catch (e) { console.log('AudioBridge not available:', e); }
-    stopListening();
-  }
 };
 
 document.getElementById('sendBtn').onclick = () => { unlockTTS(); sendUser(textInput.value); textInput.value = ''; };
