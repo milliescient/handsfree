@@ -176,6 +176,8 @@ function showPage(page) {
   if (page === 'hosts') {
     showHostPicker();
   } else if (page === 'sessions') {
+    // Reset lastSelectedSession so user can re-select the same session
+    lastSelectedSession = null;
     // Use cached sessions (updated from hello message and after each session use)
     showSessionPicker(cachedSessions);
   } else {
@@ -190,7 +192,7 @@ let serverHost = location.host;
 const isApp = !location.host || location.protocol === 'file:' || location.host === 'localhost' || !!(window.Capacitor || window.AudioBridge);
 
 // App version - git SHA, set by build-apk.sh
-const APP_VERSION = '301f96e';
+const APP_VERSION = 'b1328cd';
 const CODE_VERSION = 'v2-delayed-bargein'; // Change this when updating VAD logic
 console.log('Code version:', CODE_VERSION);
 
