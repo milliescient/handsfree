@@ -616,6 +616,10 @@ function connect() {
         }
         add('status', 'Loaded ' + count + ' messages');
         log.scrollTop = log.scrollHeight;
+        // Debug: report final state
+        if (ws && ws.readyState === 1) {
+          ws.send(JSON.stringify({ type: 'debug', msg: 'History loaded, children=' + log.children.length + ' display=' + log.style.display }));
+        }
       }
     }
     else if (m.type === 'tool') add('tool', '⚙ ' + m.text);
@@ -628,10 +632,10 @@ function connect() {
         // If server sent audio, play it; otherwise fall back to browser TTS
         if (m.audio) {
           playServerAudio(m.audio, m.text);
-          // Mark as spoken so speak() doesn't repeat it with browser TTS
-          const clean = speakable(m.text);
+          // Mark as spoken so speak() doesn't repeat it
+          const clean = tts.speakable(m.text);
           const sentences = clean.split(/(?<=[.!?])\s+/);
-          sentences.forEach(s => spokenSentences.add(s));
+          sentences.forEach(s => tts.spokenSentences.add(s));
         } else {
           speakBrief(m.text);
         }
