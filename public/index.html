@@ -94,6 +94,7 @@
   #sendBtn { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 10px; padding: 0 16px; }
   .session-btn { width: 100%; text-align: left; background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 10px; padding: 12px 16px; margin-bottom: 8px; cursor: pointer; position: relative; }
   .session-btn:hover { border-color: var(--accent); }
+  .session-btn .title { font-size: 14px; font-weight: 600; margin-top: 2px; padding-right: 40px; }
   .session-btn .preview { color: var(--dim); font-size: 13px; margin-top: 4px; padding-right: 40px; }
   .session-btn .time { color: var(--dim); font-size: 11px; }
   .session-btn.new { border-color: var(--ok); color: var(--ok); }
@@ -467,7 +468,9 @@ function showSessionPicker(sessions) {
     btn.className = 'session-btn';
     const time = new Date(s.lastUsed).toLocaleString();
     const dir = s.cwd ? `<div class="dir">${s.cwd}</div>` : '';
-    btn.innerHTML = `<span class="delete" data-id="${s.id}">×</span><div class="time">${time}</div><div class="preview">${s.preview || '(no preview)'}</div>${dir}`;
+    // Generated title on top when we have one; the preview stays as detail.
+    const title = s.title ? `<div class="title">${s.title}</div>` : '';
+    btn.innerHTML = `<span class="delete" data-id="${s.id}">×</span><div class="time">${time}</div>${title}<div class="preview">${s.preview || '(no preview)'}</div>${dir}`;
     btn.onclick = (e) => {
       if (e.target.classList.contains('delete')) {
         e.stopPropagation();
@@ -828,9 +831,12 @@ function connect() {
       }
     }
     else if (m.type === 'sessionsUpdated') {
-      // Server confirmed session deletion
+      // Session deleted, or a background-generated title arrived
       cachedSessions = m.sessions || [];
       console.log('Sessions updated from server, count:', cachedSessions.length);
+      // Re-render only if the picker is on screen — never yank the user out
+      // of an open chat.
+      if (sessionPicker.style.display !== 'none') showSessionPicker(cachedSessions);
     }
     else if (m.type === 'history') {
       // Server sent conversation history for resumed session

@@ -478,6 +478,9 @@ async function handleAgentEvent(evt) {
     const conn = evt.connId != null ? conns.get(evt.connId) : null;
     if (conn) conn.send({ type: 'status', text: evt.text });
     else broadcast({ type: 'status', text: evt.text });
+  } else if (evt.type === 'sessionsUpdated') {
+    // agentd finished titling a session in the background — refresh pickers.
+    broadcast({ type: 'sessionsUpdated', sessions: evt.sessions });
   } else if (evt.type === 'result') {
     // A finished turn hands off to the next queued job (if any) — agentd's
     // follow-up queue event updates the mirror itself.

@@ -96,6 +96,59 @@ function addOrUpdateSession(id, preview = '', lastResponse = '', cwd = '') {
   saveSessions(sessions.slice(0, 20));
 }
 
+// ---------------------------------------------------------------------------
+// Session titles: after a session's first completed turn, ask a small model
+// for a few-word description shown in the picker. Fire-and-forget — a failed
+// or skipped title just leaves the preview text, and the next turn retries.
+// ---------------------------------------------------------------------------
+const titlesInFlight = new Set();
+
+function maybeGenerateTitle(sessionId, userText, assistantText) {
+  if (!sessionId || titlesInFlight.has(sessionId)) return;
+  const session = loadSessions().find(s => s.id === sessionId);
+  if (!session || session.title) return;
+  titlesInFlight.add(sessionId);
+  generateTitle(userText, assistantText)
+    .then((title) => {
+      if (!title) return;
+      const sessions = loadSessions();
+      const s = sessions.find(x => x.id === sessionId);
+      if (!s || s.title) return; // deleted meanwhile, or titled elsewhere
+      s.title = title;
+      saveSessions(sessions);
+      console.log(`Session ${sessionId} titled: "${title}"`);
+      emit({ type: 'sessionsUpdated', sessions: loadSessions() });
+    })
+    .catch((err) => console.error('Title generation failed:', err.message || err))
+    .finally(() => titlesInFlight.delete(sessionId));
+}
+
+async function generateTitle(userText, assistantText) {
+  const prompt =
+    'Give this conversation a title of at most five words that says what it is about. ' +
+    'Reply with the title only — no quotes, no trailing punctuation.\n\n' +
+    `User: ${String(userText).slice(0, 500)}\n\n` +
+    `Assistant: ${String(assistantText).slice(0, 500)}`;
+  // Run in DATA_DIR so the one-shot helper session picks up no project
+  // context (CLAUDE.md, settings) from the user's working directory.
+  const q = query({
+    prompt,
+    options: {
+      cwd: DATA_DIR,
+      model: 'haiku',
+      maxTurns: 1,
+      allowedTools: [],
+      systemPrompt: 'You write short, plain titles for conversations.',
+    },
+  });
+  let text = '';
+  for await (const m of q) {
+    if (m.type === 'result' && m.subtype === 'success' && m.result) text = m.result;
+  }
+  // One plain line, safe to drop into the picker's innerHTML.
+  return text.split('\n')[0].replace(/["'`<>]/g, '').replace(/\s+/g, ' ').trim().slice(0, 60);
+}
+
 const VOICE_SYSTEM_PROMPT = `
 You are operating through a hands-free voice interface. The user speaks their
 requests aloud, and every piece of text you output is read to them through
@@ -308,6 +361,7 @@ async function runTurn(job) {
         const errored = m.subtype && m.subtype !== 'success';
         if (sessionId && lastAssistantText) {
           addOrUpdateSession(sessionId, job.text, lastAssistantText);
+          maybeGenerateTitle(sessionId, job.text, lastAssistantText);
         }
         emit({
           type: 'result',
