@@ -97,6 +97,25 @@ function addOrUpdateSession(id, preview = '', lastResponse = '', cwd = '') {
 }
 
 // ---------------------------------------------------------------------------
+// Linear: personal API key (from ~/.handsfree/linear.json) unlocks the
+// official Linear MCP server in every session, whatever its cwd. Read per
+// turn so rotating the key never needs a restart; absent file = no Linear.
+// ---------------------------------------------------------------------------
+function extraMcpServers() {
+  try {
+    const { api_key } = JSON.parse(readFileSync(path.join(DATA_DIR, 'linear.json'), 'utf8'));
+    if (!api_key) return {};
+    return {
+      linear: {
+        type: 'http',
+        url: 'https://mcp.linear.app/mcp',
+        headers: { Authorization: `Bearer ${api_key}` },
+      },
+    };
+  } catch { return {}; }
+}
+
+// ---------------------------------------------------------------------------
 // Session titles: after a session's first completed turn, ask a small model
 // for a few-word description shown in the picker. Fire-and-forget — a failed
 // or skipped title just leaves the preview text, and the next turn retries.
@@ -328,6 +347,11 @@ async function runTurn(job) {
       ...(sessionId ? { resume: sessionId } : {}),
       permissionMode: 'bypassPermissions',
       allowDangerouslySkipPermissions: true,
+      // Load persistent memory (~/.claude/CLAUDE.md and any project
+      // CLAUDE.md) — the SDK skips filesystem settings by default, which
+      // made the agent forget things users told it to remember.
+      settingSources: ['user', 'project'],
+      mcpServers: extraMcpServers(),
       systemPrompt: { type: 'preset', preset: 'claude_code', append: VOICE_SYSTEM_PROMPT },
       stderr: (data) => {
         const line = String(data).trimEnd();
