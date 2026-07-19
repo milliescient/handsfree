@@ -1574,8 +1574,6 @@ micBtn.addEventListener('pointercancel', micRelease);
 
 stopBtn.onclick = () => {
   tts.stop();
-  if (handsFree) setHandsFree(false);
-  stopListening();
   if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'interrupt' }));
   // Interrupt also discards queued messages agent-side; reflect that here so
   // stale "queued" bubbles don't linger claiming they're still waiting.
@@ -1584,7 +1582,16 @@ stopBtn.onclick = () => {
   agentBusy = false;
   hideWorking();
   micBtn.classList.remove('busy');
-  setState('idle');
+  // Stay in hands-free: stop means "be quiet, I'm redirecting you", not "stop
+  // listening to me". Exiting hands-free here read as broken speech-to-text
+  // twice on 2026-07-19. Tap the mic if you actually want to leave hands-free.
+  if (handsFree) {
+    if (!listening) startListening();
+    else setState('listening');
+  } else {
+    stopListening();
+    setState('idle');
+  }
 };
 
 document.getElementById('sendBtn').onclick = () => { unlockTTS(); sendUser(textInput.value); textInput.value = ''; };

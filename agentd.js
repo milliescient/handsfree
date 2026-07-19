@@ -527,6 +527,9 @@ wss.on('connection', (ws) => {
       if (queue.length !== before) emitQueue();
       const hitActive = active && matches(activeSessionId, activeJob && activeJob.connId);
       if (hitActive) {
+        // Log successful interrupts too — the 16:09 stop-tap on 2026-07-19 was
+        // invisible because only the matched-nothing branch said anything.
+        console.log(`Interrupting active turn for session ${activeSessionId || '(new)'}`);
         try { await active.interrupt(); } catch { /* turn may have just ended */ }
       }
       if (hitActive || queue.length !== before) {
