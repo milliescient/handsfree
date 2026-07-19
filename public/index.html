@@ -100,7 +100,6 @@
   .session-btn.new { border-color: var(--ok); color: var(--ok); }
   .session-btn .delete { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); color: var(--err); font-size: 24px; padding: 12px; min-width: 44px; min-height: 44px; display: flex; align-items: center; justify-content: center; }
   .session-btn .dir { color: var(--dim); font-size: 11px; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .session-btn .badge { color: var(--accent); font-size: 10px; border: 1px solid var(--accent); border-radius: 6px; padding: 1px 6px; margin-left: 8px; vertical-align: middle; }
   #sessionPicker input { width: 100%; background: var(--panel); border: 1px solid var(--border); color: var(--text); border-radius: 10px; padding: 12px 16px; font-size: 16px; margin-bottom: 8px; outline: none; }
   #sessionPicker input:focus { border-color: var(--accent); }
   .host-btn { width: 100%; text-align: left; background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 10px; padding: 12px 16px; margin-bottom: 8px; cursor: pointer; }
@@ -471,14 +470,10 @@ function showSessionPicker(sessions) {
     const dir = s.cwd ? `<div class="dir">${s.cwd}</div>` : '';
     // Generated title on top when we have one; the preview stays as detail.
     const title = s.title ? `<div class="title">${s.title}</div>` : '';
-    // Terminal sessions (started on the desktop) get a badge with the model
-    // they last ran on — takeover resumes on that model. No delete: removing
-    // them here would mean deleting the desktop transcript.
-    const shortModel = s.model ? s.model.replace(/^claude-/, '').replace(/-\d{8}$/, '') : '';
-    const badge = s.origin === 'terminal'
-      ? `<span class="badge">terminal${shortModel ? ' · ' + shortModel : ''}</span>` : '';
+    // Terminal sessions (started on the desktop) get no delete button:
+    // removing them here would mean deleting the desktop transcript.
     const del = s.origin === 'terminal' ? '' : `<span class="delete" data-id="${s.id}">×</span>`;
-    btn.innerHTML = `${del}<div class="time">${time}${badge}</div>${title}<div class="preview">${s.preview || '(no preview)'}</div>${dir}`;
+    btn.innerHTML = `${del}<div class="time">${time}</div>${title}<div class="preview">${s.preview || '(no preview)'}</div>${dir}`;
     btn.onclick = (e) => {
       if (e.target.classList.contains('delete')) {
         e.stopPropagation();
