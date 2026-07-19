@@ -13,6 +13,22 @@ import WebSocket, { WebSocketServer } from 'ws';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+// Timestamp every log line — the 2026-07-19 freeze was undiagnosable because
+// nothing in .server.log said when anything happened.
+for (const level of ['log', 'error', 'warn']) {
+  const orig = console[level].bind(console);
+  console[level] = (...args) => orig(new Date().toISOString(), ...args);
+}
+
+// Event-loop stall detector: that freeze silenced TTS relay and transcription
+// for minutes with zero log evidence. If the loop ever blocks, say for how long.
+let lastTick = Date.now();
+setInterval(() => {
+  const gap = Date.now() - lastTick;
+  if (gap > 5000) console.error(`[stall] event loop blocked ~${(gap / 1000).toFixed(1)}s`);
+  lastTick = Date.now();
+}, 1000).unref();
+
 // Load .env (KEY=value lines) so keys survive restarts; real env wins.
 try {
   for (const line of readFileSync(path.join(__dirname, '.env'), 'utf8').split('\n')) {

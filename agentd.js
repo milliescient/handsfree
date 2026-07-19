@@ -16,6 +16,13 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+// Timestamp every log line — matches server.js; correlating the 2026-07-19
+// freeze across .agentd.log and .server.log was impossible without them.
+for (const level of ['log', 'error', 'warn']) {
+  const orig = console[level].bind(console);
+  console[level] = (...args) => orig(new Date().toISOString(), ...args);
+}
+
 // Load .env (KEY=value lines) so keys survive restarts; real env wins.
 try {
   for (const line of readFileSync(path.join(__dirname, '.env'), 'utf8').split('\n')) {
@@ -361,9 +368,40 @@ async function runTurn(job) {
       },
     },
   });
+  // Long silences read as "it's hung" over voice — the user interrupts, which
+  // (during auto-compaction) throws away minutes of work and wedges the
+  // session at the context limit. Narrate compaction explicitly and emit a
+  // spoken heartbeat when the stream goes quiet (slow API turn or a
+  // long-running tool call).
+  let compacting = false;
+  let lastActivity = Date.now();
+  const heartbeat = setInterval(() => {
+    if (Date.now() - lastActivity < 60_000) return;
+    lastActivity = Date.now();
+    emit({
+      type: 'assistant',
+      text: compacting
+        ? 'Still compacting the conversation — hang tight, no need to interrupt.'
+        : 'Still working — hang tight.',
+      connId: job.connId,
+    });
+  }, 15_000);
   try {
     for await (const m of active) {
-      if (m.type === 'system' && m.subtype === 'init') {
+      lastActivity = Date.now();
+      if (m.type === 'system' && m.subtype === 'status') {
+        if (m.status === 'compacting') {
+          compacting = true;
+          emit({
+            type: 'assistant',
+            text: 'One moment — this conversation is long, so I need to compact it before continuing. That takes a couple of minutes of silence; interrupting restarts it from scratch.',
+            connId: job.connId,
+          });
+        } else if (compacting) {
+          compacting = false;
+          emit({ type: 'assistant', text: 'Done compacting — back to your request.', connId: job.connId });
+        }
+      } else if (m.type === 'system' && m.subtype === 'init') {
         if (requested && m.session_id !== requested) {
           console.warn(`Session mismatch! Requested ${requested} but got ${m.session_id}`);
         }
@@ -375,6 +413,9 @@ async function runTurn(job) {
         const blocks = m.message?.content ?? m.content ?? [];
         for (const block of blocks) {
           if (block.type === 'text' && block.text.trim()) {
+            // Log every spoken emit — on 2026-07-19 several narrations never
+            // reached TTS and we couldn't tell whether agentd even sent them.
+            console.log(`say: ${block.text.slice(0, 80).replace(/\n/g, ' ')}`);
             emit({ type: 'assistant', text: block.text, connId: job.connId });
             lastAssistantText = block.text;
           } else if (block.type === 'tool_use') {
@@ -404,6 +445,7 @@ async function runTurn(job) {
     }
     emit({ type: 'error', text: String(err.message || err), connId: job.connId });
   } finally {
+    clearInterval(heartbeat);
     active = null;
     activeJob = null;
     activeSessionId = null;
