@@ -103,6 +103,13 @@ function addOrUpdateSession(id, preview = '', lastResponse = '', cwd = '') {
   saveSessions(sessions.slice(0, 20));
 }
 
+// Pin a session to a model (takeover choice or a mid-turn fallback switch).
+function setSessionModel(id, model) {
+  const sessions = loadSessions();
+  const s = sessions.find(x => x.id === id);
+  if (s) { s.model = model; saveSessions(sessions); }
+}
+
 // ---------------------------------------------------------------------------
 // Linear: personal API key (from ~/.handsfree/linear.json) unlocks the
 // official Linear MCP server in every session, whatever its cwd. Read per
@@ -340,7 +347,13 @@ async function runTurn(job) {
   // use the directory the client chose, falling back to the server default.
   const saved = sessionId ? loadSessions().find(s => s.id === sessionId) : null;
   const cwd = (saved && saved.cwd) || job.cwd || WORKDIR;
-  console.log(`runTurn: connId=${job.connId} resume=${requested || 'new session'} cwd=${cwd} text="${job.text.slice(0, 60)}"`);
+  // Model: sessions remember theirs (set on takeover or by a fallback switch);
+  // new sessions default to fable. Opus is the fallback because fable flags
+  // some benign conversations — the CLI then switches models mid-turn on its
+  // own and we record the switch so later turns start on Opus directly.
+  const model = (saved && saved.model) || job.model || 'claude-fable-5';
+  const FALLBACK = 'claude-opus-4-8';
+  console.log(`runTurn: connId=${job.connId} resume=${requested || 'new session'} cwd=${cwd} model=${model} text="${job.text.slice(0, 60)}"`);
   activeJob = job;
   activeSessionId = sessionId;
   // Keep a short tail of the Claude Code subprocess's stderr so a crash
@@ -350,7 +363,8 @@ async function runTurn(job) {
     prompt: job.text,
     options: {
       cwd,
-      model: 'claude-fable-5',
+      model,
+      ...(model !== FALLBACK ? { fallbackModel: FALLBACK } : {}),
       ...(sessionId ? { resume: sessionId } : {}),
       permissionMode: 'bypassPermissions',
       allowDangerouslySkipPermissions: true,
@@ -408,6 +422,8 @@ async function runTurn(job) {
         sessionId = m.session_id;
         activeSessionId = sessionId;
         addOrUpdateSession(sessionId, job.text, '', cwd);
+        // Non-default models stick to the session (e.g. a takeover on Opus).
+        if (model !== 'claude-fable-5') setSessionModel(sessionId, model);
         emit({ type: 'sessionStarted', sessionId, connId: job.connId });
       } else if (m.type === 'assistant') {
         const blocks = m.message?.content ?? m.content ?? [];
@@ -420,6 +436,18 @@ async function runTurn(job) {
             lastAssistantText = block.text;
           } else if (block.type === 'tool_use') {
             emit({ type: 'tool', text: toolSummary(block), connId: job.connId });
+          } else if (block.type === 'fallback') {
+            // The CLI switched models mid-turn (fable declined the content).
+            // Say so, and pin the session to the new model so future turns
+            // start there instead of re-tripping the same refusal.
+            const to = block.to?.model || FALLBACK;
+            console.log(`Model fallback: ${block.from?.model} -> ${to}`);
+            emit({
+              type: 'assistant',
+              text: 'Heads up — the default model declined this conversation, so I switched to Opus and will stay on it here.',
+              connId: job.connId,
+            });
+            if (sessionId) setSessionModel(sessionId, to);
           }
         }
       } else if (m.type === 'result') {
@@ -487,7 +515,7 @@ wss.on('connection', (ws) => {
         emit({ type: 'dropped', text: msg.text.trim(), connId: msg.connId, busy: !!active });
         return;
       }
-      const job = { text: msg.text.trim(), sessionId: msg.sessionId || null, cwd: msg.cwd || null, connId: msg.connId };
+      const job = { text: msg.text.trim(), sessionId: msg.sessionId || null, cwd: msg.cwd || null, model: msg.model || null, connId: msg.connId };
       if (active) {
         queue.push(job);
         // Log arrivals: without this the queue is invisible in the log until

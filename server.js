@@ -3,7 +3,7 @@
 // messages to the Claude Agent SDK over WebSocket.
 
 import { createServer } from 'node:https';
-import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync, unlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync, unlinkSync, readdirSync, statSync, openSync, readSync, closeSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { networkInterfaces, homedir, hostname } from 'node:os';
 import { randomBytes } from 'node:crypto';
@@ -283,6 +283,112 @@ function saveSessions(sessions) {
   try { writeFileSync(SESSIONS_FILE, JSON.stringify(sessions, null, 2)); } catch {}
 }
 
+// ---------------------------------------------------------------------------
+// Terminal sessions: Claude Code sessions started outside this app (desktop,
+// SSH) live only as transcripts under ~/.claude/projects. Surface the recent
+// ones in the picker so the phone can take them over directly. Each entry
+// carries the cwd (the registry doesn't know it) and the last-used model, so
+// takeover resumes in the right directory on the right model — a session that
+// fable flagged and switched to opus stays on opus.
+// ---------------------------------------------------------------------------
+
+// Pull picker metadata out of a transcript without reading the whole file
+// (some are tens of MB): head for cwd + first user message, tail for the
+// model of the last real assistant message.
+function readSessionMeta(file) {
+  let fd;
+  try {
+    fd = openSync(file, 'r');
+    const size = statSync(file).size;
+    const headBuf = Buffer.alloc(Math.min(size, 16384));
+    readSync(fd, headBuf, 0, headBuf.length, 0);
+    const tailLen = Math.min(size, 65536);
+    const tailBuf = Buffer.alloc(tailLen);
+    readSync(fd, tailBuf, 0, tailLen, size - tailLen);
+    closeSync(fd);
+    fd = null;
+
+    let cwd = null, preview = '';
+    for (const line of headBuf.toString('utf8').split('\n')) {
+      let e; try { e = JSON.parse(line); } catch { continue; }
+      if (!cwd && e.cwd) cwd = e.cwd;
+      if (!preview && e.type === 'user' && e.message?.content && !e.isMeta) {
+        const c = e.message.content;
+        const text = typeof c === 'string' ? c
+          : c.filter(b => b.type === 'text').map(b => b.text).join(' ');
+        const t = (text || '').trim();
+        // Skip command wrappers / injected context, keep the first real ask.
+        if (t && !t.startsWith('<')) preview = t.slice(0, 120);
+      }
+      if (cwd && preview) break;
+    }
+
+    let model = null;
+    const tailLines = tailBuf.toString('utf8').split('\n');
+    for (let i = tailLines.length - 1; i >= 0; i--) {
+      let e; try { e = JSON.parse(tailLines[i]); } catch { continue; }
+      if (e.type === 'assistant' && e.message?.model && e.message.model !== '<synthetic>') {
+        model = e.message.model;
+        break;
+      }
+    }
+    if (!cwd) return null;
+    return { cwd, preview: preview || '(terminal session)', model };
+  } catch {
+    if (fd != null) { try { closeSync(fd); } catch {} }
+    return null;
+  }
+}
+
+function scanTerminalSessions(knownIds) {
+  const projectsDir = path.join(homedir(), '.claude', 'projects');
+  const candidates = [];
+  let dirs;
+  try { dirs = readdirSync(projectsDir); } catch { return []; }
+  for (const proj of dirs) {
+    let files;
+    try { files = readdirSync(path.join(projectsDir, proj)); } catch { continue; }
+    for (const f of files) {
+      // agent-* files are subagent sidechains, not resumable sessions.
+      if (!f.endsWith('.jsonl') || f.startsWith('agent-')) continue;
+      const id = f.slice(0, -6);
+      if (knownIds.has(id)) continue;
+      const file = path.join(projectsDir, proj, f);
+      let st;
+      try { st = statSync(file); } catch { continue; }
+      if (st.size < 2048) continue; // aborted / trivial sessions
+      candidates.push({ id, file, mtime: st.mtimeMs });
+    }
+  }
+  candidates.sort((a, b) => b.mtime - a.mtime);
+  const out = [];
+  for (const c of candidates.slice(0, 15)) {
+    const meta = readSessionMeta(c.file);
+    if (!meta) continue;
+    // agentd's one-shot title-generator sessions run in the data dir — noise.
+    if (meta.cwd === path.join(homedir(), '.handsfree')) continue;
+    out.push({
+      id: c.id, lastUsed: c.mtime, preview: meta.preview, lastResponse: '',
+      cwd: meta.cwd, model: meta.model, origin: 'terminal',
+    });
+  }
+  return out;
+}
+
+// Registry sessions (voice) merged with recent terminal sessions, newest
+// first. The disk scan is cached briefly; the registry is always read fresh
+// so titling/model updates from agentd show up immediately.
+let termScanCache = { at: 0, data: [] };
+function listAllSessions() {
+  const registry = loadSessions();
+  const knownIds = new Set(registry.map(s => s.id));
+  if (Date.now() - termScanCache.at > 5000) {
+    termScanCache = { at: Date.now(), data: scanTerminalSessions(knownIds) };
+  }
+  const terminal = termScanCache.data.filter(s => !knownIds.has(s.id));
+  return [...registry, ...terminal].sort((a, b) => (b.lastUsed || 0) - (a.lastUsed || 0));
+}
+
 // Load conversation history from SDK session file. Includes tool-use entries
 // formatted the same way agentd streams them live, so a reloaded chat looks
 // exactly like it did when the app was closed.
@@ -293,7 +399,18 @@ function loadSessionHistory(sessionId, maxMessages = 200) {
   const session = loadSessions().find(s => s.id === sessionId);
   const cwd = (session && session.cwd) || WORKDIR;
   const projectPath = cwd.replace(/\//g, '-');
-  const sessionFile = path.join(homeDir, '.claude', 'projects', projectPath, `${sessionId}.jsonl`);
+  let sessionFile = path.join(homeDir, '.claude', 'projects', projectPath, `${sessionId}.jsonl`);
+  if (!existsSync(sessionFile)) {
+    // Terminal sessions aren't in the registry, so their cwd is unknown here
+    // until the first voice turn registers them — find the transcript by scan.
+    try {
+      const projectsDir = path.join(homeDir, '.claude', 'projects');
+      for (const proj of readdirSync(projectsDir)) {
+        const cand = path.join(projectsDir, proj, `${sessionId}.jsonl`);
+        if (existsSync(cand)) { sessionFile = cand; break; }
+      }
+    } catch {}
+  }
 
   const messages = [];
   try {
@@ -386,7 +503,7 @@ const server = createServer(loadOrCreateCert(), async (req, res) => {
     }
   } else if (url.pathname === '/sessions' && req.method === 'GET') {
     res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify(loadSessions()));
+    res.end(JSON.stringify(listAllSessions()));
   } else if (url.pathname === '/version' && req.method === 'GET') {
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ version: SERVED_APK_VERSION }));
@@ -496,12 +613,13 @@ async function handleAgentEvent(evt) {
     else broadcast({ type: 'status', text: evt.text });
   } else if (evt.type === 'sessionsUpdated') {
     // agentd finished titling a session in the background — refresh pickers.
-    broadcast({ type: 'sessionsUpdated', sessions: evt.sessions });
+    // agentd only knows the registry; re-merge terminal sessions here.
+    broadcast({ type: 'sessionsUpdated', sessions: listAllSessions() });
   } else if (evt.type === 'result') {
     // A finished turn hands off to the next queued job (if any) — agentd's
     // follow-up queue event updates the mirror itself.
     agentBusy = pendingQueue.length > 0;
-    broadcast({ type: 'result', ok: evt.ok, text: evt.text, sessions: evt.sessions });
+    broadcast({ type: 'result', ok: evt.ok, text: evt.text, sessions: listAllSessions() });
   } else if (evt.type === 'error') {
     agentBusy = false;
     broadcast({ type: 'error', text: evt.text });
@@ -536,7 +654,7 @@ wss.on('connection', (ws, req) => {
   console.log(`New WebSocket connection from ${req.socket.remoteAddress} UA=${req.headers['user-agent'] || 'unknown'}`);
   const send = (obj) => { if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(obj)); };
   const connId = nextConnId++;
-  const conn = { sessionId: null, sessionChosen: false, cwd: null, send };
+  const conn = { sessionId: null, sessionChosen: false, cwd: null, model: null, send };
   conns.set(connId, conn);
 
   // Heartbeat to keep connection alive
@@ -548,7 +666,7 @@ wss.on('connection', (ws, req) => {
   });
 
   // busy lets a phone that reconnects mid-turn know work is still in flight
-  send({ type: 'hello', workdir: WORKDIR, hostname: hostname(), sessions: loadSessions(), version: SERVED_APK_VERSION, busy: agentBusy });
+  send({ type: 'hello', workdir: WORKDIR, hostname: hostname(), sessions: listAllSessions(), version: SERVED_APK_VERSION, busy: agentBusy });
 
   ws.on('message', async (data) => {
     let msg;
@@ -571,6 +689,18 @@ wss.on('connection', (ws, req) => {
       // For new sessions the client may pick a working directory; validate it
       // here so a typo'd path fails loudly instead of confusing the SDK.
       conn.cwd = null;
+      conn.model = null;
+      if (conn.sessionId) {
+        // Taking over a terminal session: agentd's registry doesn't know it
+        // yet, so pass its cwd and last-used model with the first message.
+        // agentd registers and pins both after the first voice turn.
+        const entry = listAllSessions().find(s => s.id === conn.sessionId);
+        if (entry && entry.origin === 'terminal') {
+          conn.cwd = entry.cwd || null;
+          conn.model = entry.model || null;
+          console.log(`Terminal takeover: ${conn.sessionId} cwd=${conn.cwd} model=${conn.model}`);
+        }
+      }
       if (!conn.sessionId && msg.cwd) {
         const dir = expandDir(msg.cwd);
         if (existsSync(dir)) {
@@ -608,8 +738,10 @@ wss.on('connection', (ws, req) => {
       const updated = sessions.filter(s => s.id !== msg.id);
       saveSessions(updated);
       console.log('Deleted session:', msg.id);
-      // Send updated sessions list back to client
-      send({ type: 'sessionsUpdated', sessions: updated });
+      // Send updated sessions list back to client. Terminal sessions can't be
+      // deleted from here (that would mean deleting the desktop transcript) —
+      // they just stay in the list.
+      send({ type: 'sessionsUpdated', sessions: listAllSessions() });
     } else if (msg.type === 'user' && typeof msg.text === 'string' && msg.text.trim()) {
       console.log(`Received user message, sessionId=${conn.sessionId}, sessionChosen=${conn.sessionChosen}`);
       if (!conn.sessionChosen) {
@@ -634,7 +766,7 @@ wss.on('connection', (ws, req) => {
       if (!agentWs || agentWs.readyState !== WebSocket.OPEN) {
         send({ type: 'status', text: 'agent is restarting — your message is queued' });
       }
-      sendToAgent({ type: 'user', text, sessionId: conn.sessionId, cwd: conn.cwd, connId });
+      sendToAgent({ type: 'user', text, sessionId: conn.sessionId, cwd: conn.cwd, model: conn.model, connId });
     } else if (msg.type === 'vad_debug') {
       // Log VAD debug info for analyzing false triggers
       console.log(`[VAD] energy=${msg.energy.toFixed(4)} max=${msg.maxSample.toFixed(4)} samples=${msg.samples} playback=${msg.duringPlayback}`);
